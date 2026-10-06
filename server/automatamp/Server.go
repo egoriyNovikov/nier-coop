@@ -109,8 +109,8 @@ func checkClientIsAuthorized(ev enet.Event, data []byte) bool {
 }
 
 func service() {
-	// Wait until the next event
-	ev := currentServer.Host.Service(0)
+	// Wait until the next event (up to 1ms, so the loop doesn't spin a whole CPU core)
+	ev := currentServer.Host.Service(1)
 	evHandleCount := 0
 
 	for ev.GetType() != enet.EventNone {

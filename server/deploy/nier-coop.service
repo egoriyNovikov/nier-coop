@@ -1,0 +1,20 @@
+[Unit]
+Description=nier-coop (AutomataMP) game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nier
+Group=nier
+WorkingDirectory=/opt/nier-coop
+ExecStart=/opt/nier-coop/server -mode server
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/nier-coop
+
+[Install]
+WantedBy=multi-user.target

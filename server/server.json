@@ -1,7 +1,7 @@
 {
     "password": "",
     "masterServer": "https://niermaster.praydog.com",
-    "masterServerNotify": true,
+    "masterServerNotify": false,
     "name": "AutomataMP Server",
     "port": "6969"
 }
