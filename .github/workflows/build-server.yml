@@ -7,30 +7,33 @@ jobs:
     runs-on: ${{matrix.os}}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            binary: server
+          - os: windows-latest
+            binary: server.exe
     steps:
-    - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.18
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
 
-    - name: Build Linux
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libenet-dev
-        sudo apt-get install -y pkg-config
-        cd server && go build -o server main.go
-      if: matrix.os == 'ubuntu-latest'
-      
-    - name: Build Windows
-      run: cd server && go build -o server.exe main.go
-      if: matrix.os == 'windows-latest'
-        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v2.3.1
-      with:
-        name: server
-        path: ${{github.workspace}}/server
-        if-no-files-found: error
+      - name: Install ENet
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libenet-dev pkg-config
+
+      - name: Build
+        working-directory: server
+        run: go build -o ${{matrix.binary}} main.go
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{runner.os}}
+          path: |
+            ${{github.workspace}}/server/${{matrix.binary}}
+            ${{github.workspace}}/server/server.json
+          if-no-files-found: error
