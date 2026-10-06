@@ -34,3 +34,30 @@ out/*
 tools/steamtwice/build/*
 tools/steamtwice/CMakeFiles
 tools/steamtwice/CMakeCache*
+
+# IDEs and OS
+.idea/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backups and temporary files
+*~
+*.bak
+*.bak_*
+*.tmp
+*.orig
+
+# Go server binaries (Linux build, local Windows build is covered by *.exe)
+server/server
+server/automatamp_server/
+
+# Game logs if copied into the repo for debugging
+automatamp_log*.txt
+server_log.txt
+*.log
+
+# Local Claude Code settings
+.claude/settings.local.json

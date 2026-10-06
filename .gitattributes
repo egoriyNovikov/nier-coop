@@ -1,0 +1,14 @@
+# The repository stores text files with LF. Git converts CRLF from editors on commit,
+# so line endings never show up as changes in the diff.
+* text=auto eol=lf
+
+# Windows batch files need CRLF to run reliably
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pdb binary
