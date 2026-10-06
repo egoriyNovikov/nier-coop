@@ -24,14 +24,25 @@ NetworkEntity::NetworkEntity(sdk::Entity* entity, uint32_t guid)
 }
 
 void NetworkEntity::start_animation_hook(sdk::Behavior* behavior, uint32_t anim, uint32_t variant, uint32_t a3, uint32_t a4) {
-    scoped_lock _(g_entity_sync->m_map_mutex);
-
     spdlog::info("NETWORKENTITY anim: {}, variant: {}, a3: {}, return: {:x}", anim, variant, a3, (uintptr_t)_ReturnAddress());
 
     auto amp = AutomataMPMod::get();
     auto& client = amp->get_client();
 
-    auto network_entity = g_entity_sync->get_network_entity_from_handle(behavior->get_entity()->handle);
+    // Keeps the hook (and the original vtable) alive while we call into the game without holding the lock.
+    std::shared_ptr<NetworkEntity> network_entity{};
+
+    {
+        scoped_lock _(g_entity_sync->m_map_mutex);
+        network_entity = g_entity_sync->get_network_entity_from_handle(behavior->get_entity()->handle);
+    }
+
+    // Can happen right after a level load reset the EntitySync. Without the hook we have no
+    // original to call, skipping one animation is harmless.
+    if (network_entity == nullptr || network_entity->m_hook == nullptr) {
+        spdlog::error("NETWORKENTITY animation for an unknown entity, skipped");
+        return;
+    }
 
     if (client != nullptr) {
         client->send_entity_animation_start(network_entity->get_guid(), anim, variant, a3, a4);
@@ -177,10 +188,18 @@ void EntitySync::remove_entity(uint32_t identifier) {
 }
 
 void EntitySync::think() {
-    scoped_lock _(m_map_mutex);
+    // Copy what we need under the lock, then call into the game without it.
+    // Holding the lock across game calls deadlocks with the game's own spawn/terminate threads.
+    std::vector<std::pair<uint32_t, std::shared_ptr<NetworkEntity>>> entities{};
 
-    for (auto& it : m_network_entities) {
-        auto networked_entity = it.second;
+    {
+        scoped_lock _(m_map_mutex);
+        entities.assign(m_network_entities.begin(), m_network_entities.end());
+    }
+
+    const auto is_master_client = AutomataMPMod::get()->is_server();
+
+    for (auto& [guid, networked_entity] : entities) {
         auto ent = networked_entity->get_entity();
 
         if (ent == nullptr) {
@@ -194,13 +213,8 @@ void EntitySync::think() {
             continue;
         }
 
-        if (AutomataMPMod::get()->is_server()) {
-            /*packet.position = *npc->getPosition();
-            packet.facing = *npc->getFacing();
-            packet.facing2 = *npc->getFacing2();
-            packet.health = *npc->getHealth();*/
-
-            AutomataMPMod::get()->get_client()->send_entity_data(it.first, npc);
+        if (is_master_client) {
+            AutomataMPMod::get()->get_client()->send_entity_data(guid, npc);
         }
         else {
             npc->position() = *(Vector3f*)&packet.position();
@@ -214,8 +228,6 @@ void EntitySync::think() {
 
     // genius moment
     try {
-        const auto is_master_client = AutomataMPMod::get()->is_server();
-
         // Delete any entities that are not supposed to be networked.
         if (!is_master_client) {
             auto entity_list = sdk::EntityList::get();
@@ -224,24 +236,27 @@ void EntitySync::think() {
                 return;
             }
 
-            for (auto i = 0; i < entity_list->size(); ++i) {
-                auto container = entity_list->get(i);
+            std::vector<sdk::Entity*> to_delete{};
 
-                if (container == nullptr) {
-                    continue;
+            {
+                scoped_lock _(m_map_mutex);
+
+                for (auto i = 0; i < entity_list->size(); ++i) {
+                    auto container = entity_list->get(i);
+
+                    if (container == nullptr || container->behavior == nullptr) {
+                        continue;
+                    }
+
+                    if (!m_handle_map.contains(container->handle) && container->behavior->is_networkable()) {
+                        to_delete.push_back(container);
+                    }
                 }
+            }
 
-                auto behavior = container->behavior;
-
-                if (behavior == nullptr) {
-                    continue;
-                }
-
-                // Delete any entities that are not supposed to be networked.
-                if (!m_handle_map.contains(container->handle) && behavior->is_networkable()) {
-                    spdlog::info("Deleting entity {:x} {}", (uintptr_t)container, container->name);
-                    behavior->terminate();
-                }
+            for (auto container : to_delete) {
+                spdlog::info("Deleting entity {:x} {}", (uintptr_t)container, container->name);
+                container->behavior->terminate();
             }
         }
     } catch(...) {

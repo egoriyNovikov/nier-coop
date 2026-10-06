@@ -45,6 +45,12 @@ std::optional<std::string> AutomataMPMod::on_initialize() try {
     std::strcpy(m_port_connect_input.data(), DEFAULT_PORT);
     std::strcpy(m_name_input.data(), DEFAULT_NAME);
     std::strcpy(m_master_server_input.data(), DEFAULT_MASTER);
+    std::strcpy(m_join_address_input.data(), DEFAULT_IP ":" DEFAULT_PORT);
+    std::strcpy(m_host_port_input.data(), DEFAULT_PORT);
+
+    if (const auto user = std::getenv("USERNAME"); user != nullptr && *user != '\0') {
+        strncpy_s(m_name_input.data(), m_name_input.size(), user, _TRUNCATE);
+    }
 
     // Do it later.
     enetpp::global_state::get().initialize();
@@ -113,14 +119,9 @@ void AutomataMPMod::display_servers() {
 			strcpy(m_ip_connect_input.data(), server->ip.c_str());
             strcpy(m_port_connect_input.data(), server->port.c_str());
 
-            m_client.reset();
-            
-            m_client = make_unique<NierClient>(server->ip.data(), server->port.data(), m_name_input.data(), m_password_input.data());
+            start_connect(server->ip, server->port, false);
 
-            if (!m_client->is_connected()) {
-                m_client.reset();
-            }
-
+            ImGui::PopID();
             return;
         }
 
@@ -172,8 +173,6 @@ void AutomataMPMod::display_servers() {
 void AutomataMPMod::display_manual_connect() {
     if (ImGui::Button("Connect") || ImGui::InputText("Connect IP", m_ip_connect_input.data(), m_ip_connect_input.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
         
-        m_client.reset();
-
         // validate against master server
         const auto connection_info = validate_connection(m_ip_connect_input.data(), m_port_connect_input.data());
         const auto val_ip = std::get<0>(connection_info);
@@ -186,11 +185,7 @@ void AutomataMPMod::display_manual_connect() {
             return;
         }
 
-        m_client = make_unique<NierClient>(val_ip, val_port, m_name_input.data(), m_password_input.data());
-
-        if (!m_client->is_connected()) {
-            m_client.reset();
-        }
+        start_connect(val_ip, val_port, false);
     }
 
     ImGui::InputText("Connect Port", m_port_connect_input.data(), m_port_connect_input.size());
@@ -198,14 +193,239 @@ void AutomataMPMod::display_manual_connect() {
     ImGui::InputText("Password", m_password_input.data(), m_password_input.size());
 }
 
+void AutomataMPMod::start_connect(const std::string& host, const std::string& port, bool is_host) {
+    std::scoped_lock _{m_client_mutex};
+
+    if (m_client != nullptr) {
+        m_wants_destroy_client = true;
+    }
+
+    // The freshly started server needs a moment before it listens.
+    m_pending_connect = PendingConnect{
+        host,
+        port,
+        std::chrono::steady_clock::now() + (is_host ? std::chrono::milliseconds(500) : std::chrono::milliseconds(0)),
+        is_host ? 5 : 1,
+    };
+
+    m_coop_status = "Connecting to " + host + ":" + port + "...";
+}
+
+void AutomataMPMod::destroy_client() {
+    std::scoped_lock _{m_client_mutex};
+
+    m_pending_connect.reset();
+    m_wants_destroy_client = true;
+
+    if (m_is_hosting) {
+        m_coop_server.stop();
+        m_is_hosting = false;
+    }
+
+    m_coop_status = "Disconnected";
+}
+
+// Render thread. Creates the client, watches its state and keeps the network
+// going while on_think doesn't run (main menu, loading screens).
+void AutomataMPMod::update_connection() {
+    std::scoped_lock _{m_client_mutex};
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto in_world = now - m_last_think.load() < std::chrono::milliseconds(300);
+
+    // on_think takes care of destroying the client while the world is loaded,
+    // so story buddies get their AI back.
+    if (m_wants_destroy_client && (!in_world || m_client == nullptr)) {
+        m_client.reset();
+        m_wants_destroy_client = false;
+    }
+
+    if (m_client == nullptr && !m_wants_destroy_client && m_pending_connect && m_pending_connect->attempts_left > 0 &&
+        now >= m_pending_connect->next_attempt) {
+        spdlog::info("[Coop] Connecting to {}:{}", m_pending_connect->host, m_pending_connect->port);
+
+        try {
+            m_client = make_unique<NierClient>(m_pending_connect->host, m_pending_connect->port, m_name_input.data(), m_password_input.data());
+        } catch (const std::exception& e) {
+            m_coop_status = std::string{"Invalid address: "} + e.what();
+            m_pending_connect.reset();
+            return;
+        }
+
+        --m_pending_connect->attempts_left;
+    }
+
+    if (m_client == nullptr || m_wants_destroy_client) {
+        return;
+    }
+
+    m_client->use_story_buddy = m_coop_use_story_buddy;
+    m_client->auto_swap_character = m_coop_auto_swap;
+    m_client->spawn_partner = m_coop_spawn_partner;
+    m_client->sync_enemies = m_coop_sync_enemies;
+
+    if (!in_world) {
+        m_client->pump();
+    }
+
+    if (m_client->is_connecting()) {
+        return;
+    }
+
+    if (m_client->is_connected()) {
+        if (m_pending_connect) {
+            m_pending_connect.reset();
+        }
+
+        if (!m_client->is_in_session()) {
+            m_coop_status = "Connected. Waiting for your character to be in the world...";
+        } else {
+            m_coop_status = m_client->is_master_client() ? "In session (host)" : "In session";
+
+            if (!m_client->has_local_character()) {
+                m_coop_status += ". Sync paused: you are not controlling 2B/9S/A2 right now";
+            }
+        }
+
+        return;
+    }
+
+    // Failed to connect or the connection was lost.
+    const auto was_in_session = m_client->is_in_session();
+    m_wants_destroy_client = true;
+
+    if (was_in_session) {
+        m_coop_status = "Connection lost";
+        m_pending_connect.reset();
+    } else if (m_pending_connect && m_pending_connect->attempts_left > 0) {
+        m_pending_connect->next_attempt = now + std::chrono::milliseconds(700);
+    } else {
+        m_coop_status = "Could not connect";
+
+        if (m_pending_connect) {
+            m_coop_status += " to " + m_pending_connect->host + ":" + m_pending_connect->port;
+        }
+
+        if (m_is_hosting && !m_coop_server.is_running()) {
+            m_coop_status += ". The server stopped, see automatamp_server\\server_log.txt";
+        }
+
+        m_pending_connect.reset();
+    }
+}
+
+void AutomataMPMod::display_coop() {
+    // The render thread never waits for the game thread, see on_frame.
+    std::unique_lock lock{m_client_mutex, std::try_to_lock};
+
+    if (!lock.owns_lock()) {
+        ImGui::TextWrapped("Status: %s", m_coop_status.empty() ? "Disconnected" : m_coop_status.c_str());
+        return;
+    }
+
+    ImGui::TextWrapped("Status: %s", m_coop_status.empty() ? "Disconnected" : m_coop_status.c_str());
+
+    const auto busy = m_client != nullptr || m_pending_connect.has_value();
+
+    if (busy) {
+        if (ImGui::Button(m_is_hosting ? "Stop hosting" : "Leave")) {
+            destroy_client();
+            return;
+        }
+    }
+
+    if (m_is_hosting) {
+        ImGui::Separator();
+        ImGui::TextWrapped("Give one of these addresses to your partner (LAN or VPN like Radmin/ZeroTier/Tailscale; "
+                           "over the internet use your public IP with UDP port %s forwarded):", m_host_port_input.data());
+
+        for (const auto& address : CoopServer::get_local_addresses()) {
+            const auto text = address.ip + ":" + m_host_port_input.data();
+
+            ImGui::PushID(text.c_str());
+
+            if (ImGui::Button("Copy")) {
+                ImGui::SetClipboardText(text.c_str());
+            }
+
+            ImGui::SameLine();
+            ImGui::Text("%s  (%s)", text.c_str(), address.adapter.c_str());
+            ImGui::PopID();
+        }
+    }
+
+    if (m_client != nullptr && m_client->is_in_session()) {
+        ImGui::Separator();
+        m_client->on_draw_ui();
+    }
+
+    if (busy) {
+        return;
+    }
+
+    ImGui::InputText("Name", m_name_input.data(), m_name_input.size());
+    ImGui::InputText("Password", m_password_input.data(), m_password_input.size(), ImGuiInputTextFlags_Password);
+
+    ImGui::Separator();
+    ImGui::SetNextItemWidth(80);
+    ImGui::InputText("Port", m_host_port_input.data(), m_host_port_input.size(), ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+
+    if (ImGui::Button("Host Game")) {
+        if (const auto error = m_coop_server.start(m_host_port_input.data(), m_password_input.data()); error) {
+            m_coop_status = *error;
+        } else {
+            m_is_hosting = true;
+            start_connect(DEFAULT_IP, m_host_port_input.data(), true);
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::InputText("Host address", m_join_address_input.data(), m_join_address_input.size());
+
+    if (ImGui::Button("Join Game")) {
+        std::string address = m_join_address_input.data();
+        std::string port = DEFAULT_PORT;
+
+        if (const auto colon = address.rfind(':'); colon != std::string::npos) {
+            port = address.substr(colon + 1);
+            address = address.substr(0, colon);
+        }
+
+        if (address.empty() || port.empty() || !std::all_of(port.begin(), port.end(), ::isdigit)) {
+            m_coop_status = "Enter the address as IP:port, for example 192.168.1.10:6969";
+        } else {
+            start_connect(address, port, false);
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::Checkbox("Partner controls my story buddy", &m_coop_use_story_buddy);
+    ImGui::Checkbox("Take over the buddy if I play the host's character", &m_coop_auto_swap);
+    ImGui::Checkbox("Spawn a partner when there is no story buddy", &m_coop_spawn_partner);
+    ImGui::Checkbox("Shared enemies from the host (both players must enable it)", &m_coop_sync_enemies);
+    ImGui::TextWrapped("You can connect from the main menu, your character joins once you are in the world. "
+                       "The host should join first. Both players should load the same save.");
+}
+
 void AutomataMPMod::on_draw_ui() {
-    if (!ImGui::CollapsingHeader("AutomataMPMod")) {
+    if (ImGui::CollapsingHeader("Co-op", ImGuiTreeNodeFlags_DefaultOpen)) {
+        display_coop();
+    }
+
+    if (!ImGui::CollapsingHeader("AutomataMP (advanced)")) {
+        return;
+    }
+
+    std::unique_lock lock{m_client_mutex, std::try_to_lock};
+
+    if (!lock.owns_lock()) {
         return;
     }
 
     if (m_client) {
         if (ImGui::Button("Disconnect")) {
-            m_client.reset();
+            destroy_client();
             return;
         }
         ImGui::Text("State: Client");
@@ -224,40 +444,55 @@ void AutomataMPMod::on_draw_ui() {
         display_manual_connect();
         ImGui::TreePop();
     }
-    
-    if (m_client) {
-        m_client->on_draw_ui();
-    }
 }
 
 void AutomataMPMod::on_frame() {
-    if (m_client && m_client->is_master_client()) {
-        // Draw "Server" at 0, 0 with red text.
-        ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), "MasterClient");
-    }
-    else if (m_client) {
-        // Draw "Client" at 0, 0 with green text.
-        ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), "Client");
+    // Render thread: never block on the game thread. While on_think holds the lock it may be
+    // waiting inside a game function, blocking here as well can freeze the whole game.
+    std::unique_lock lock{m_client_mutex, std::try_to_lock};
+
+    if (!lock.owns_lock()) {
+        return;
     }
 
-    if (!m_client) {
-        // Draw "Disconnected" at 0, 0 with red text.
-        ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), "Disconnected");
+    update_connection();
+
+    const char* state = "Disconnected";
+
+    if (m_client && m_client->is_in_session()) {
+        state = m_client->is_master_client() ? "Co-op: Host" : "Co-op: Client";
+    } else if (m_client || m_pending_connect) {
+        state = "Co-op: Connecting";
     }
 
-    if (m_client) {
+    ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), state);
+
+    if (m_client && !m_wants_destroy_client) {
         m_client->on_frame();
     }
 }
 
 void AutomataMPMod::on_think() {
-    if (sdk::is_loading() || m_wants_destroy_client) {
+    std::scoped_lock _{m_client_mutex};
+
+    m_last_think = std::chrono::steady_clock::now();
+
+    if (m_wants_destroy_client) {
         if (m_client != nullptr) {
-            m_client->disconnect();
+            m_client->release_puppets();
             m_client.reset();
         }
 
         m_wants_destroy_client = false;
+        return;
+    }
+
+    // The connection stays alive through loading screens, only the entity handles are dropped.
+    if (sdk::is_loading()) {
+        if (m_client != nullptr) {
+            m_client->on_world_unloaded();
+        }
+
         return;
     }
 

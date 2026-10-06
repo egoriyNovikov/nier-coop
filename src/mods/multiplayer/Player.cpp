@@ -9,7 +9,8 @@ sdk::Pl0000* Player::get_entity() {
 
     auto ent = sdk::EntityList::get()->get_by_handle(m_entity_handle);
 
-    if (!ent) {
+    // The handle may belong to something that isn't an android (Flight Unit...).
+    if (!ent || ent->behavior == nullptr || !ent->behavior->is_pl0000()) {
         return nullptr;
     }
 

@@ -28,6 +28,15 @@ public:
 
     void set_start_tick(float tick) { m_start_tick = tick; }
 
+    uint32_t get_model() const { return m_model; }
+
+    void set_model(uint32_t model) { m_model = model; }
+
+    // True if the puppet is the game's own story buddy rather than a "partner" we spawned.
+    bool is_story_buddy() const { return m_is_story_buddy; }
+
+    void set_story_buddy(bool value) { m_is_story_buddy = value; }
+
     sdk::Pl0000* get_entity();
 
 private:
@@ -35,5 +44,7 @@ private:
     uint64_t m_guid{};
     uint32_t m_entity_handle{0};
     float m_start_tick{0.0f};
+    uint32_t m_model{0};
+    bool m_is_story_buddy{false};
     nier::PlayerData m_player_data;
 };

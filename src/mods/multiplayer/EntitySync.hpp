@@ -59,6 +59,8 @@ public:
     void think();
     void process_entity_data(uint32_t guid, const nier::EntityData* data);
 
+    uint32_t get_max_guid() const { return m_max_guid; }
+
     std::shared_ptr<NetworkEntity> get_network_entity_from_handle(uint32_t handle) {
         auto it = m_handle_map.find(handle);
 

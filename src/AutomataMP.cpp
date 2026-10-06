@@ -127,10 +127,36 @@ void AutomataMP::hook_monitor() {
     }
 }
 
+namespace {
+// Every running copy of the game gets its own log (automatamp_log.txt, automatamp_log_2.txt, ...),
+// otherwise a second copy truncates and overwrites the log of the first one.
+std::string get_log_filename() {
+    for (auto i = 1; i < 16; ++i) {
+        const auto mutex_name = "AutomataMP_LogInstance_" + std::to_string(i);
+
+        // Intentionally leaked, it marks this slot as taken until the process exits.
+        const auto mutex = CreateMutexA(nullptr, TRUE, mutex_name.c_str());
+
+        if (mutex == nullptr) {
+            continue;
+        }
+
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(mutex);
+            continue;
+        }
+
+        return i == 1 ? "automatamp_log.txt" : "automatamp_log_" + std::to_string(i) + ".txt";
+    }
+
+    return "automatamp_log_" + std::to_string(GetCurrentProcessId()) + ".txt";
+}
+}
+
 AutomataMP::AutomataMP(HMODULE AutomataMP_module)
     : m_automatamp_module{AutomataMP_module}
     , m_game_module{GetModuleHandle(0)}
-    , m_logger{spdlog::basic_logger_mt("AutomataMP", "automatamp_log.txt", true)} {
+    , m_logger{spdlog::basic_logger_mt("AutomataMP", get_log_filename(), true)} {
     spdlog::set_default_logger(m_logger);
     spdlog::flush_on(spdlog::level::info);
     spdlog::info("AutomataMP entry");

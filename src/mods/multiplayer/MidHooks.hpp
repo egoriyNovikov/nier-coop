@@ -41,7 +41,8 @@ public:
     typedef void (MidHooks::*MemberMidCallbackFn)(safetyhook::Context&);
     typedef void (MidHooks::*MemberInlineCallbackFn)(HookAndParams&);
 
-    static inline bool s_ignore_spawn{false};
+    // Per thread: the game spawns from several threads, only our own spawns must be skipped.
+    static inline thread_local bool s_ignore_spawn{false};
 
 private:
     void add_hook(uintptr_t address, MemberMidCallbackFn cb);
@@ -63,6 +64,5 @@ private:
 
     std::unordered_set<sdk::Behavior*> m_overriden_entities;
 
-    std::recursive_mutex m_spawn_mutex;
     std::unordered_map<uint32_t, sdk::EntitySpawnParams*> m_thread_id_to_spawn_params;
 };

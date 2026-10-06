@@ -14,6 +14,63 @@
 
 using namespace std;
 
+namespace {
+// Runs a callback when leaving the scope.
+template <typename T>
+struct ScopeExit {
+    T fn;
+    ~ScopeExit() { fn(); }
+};
+
+template <typename T>
+ScopeExit(T) -> ScopeExit<T>;
+
+// The character the client takes when it plays the same one as the host.
+uint32_t get_counterpart_model(uint32_t model) {
+    switch (model) {
+    case sdk::EModel::MODEL_2B:
+        return sdk::EModel::MODEL_9S;
+    case sdk::EModel::MODEL_9S:
+        return sdk::EModel::MODEL_2B;
+    default:
+        return model;
+    }
+}
+
+bool is_character_model(uint32_t model) {
+    return model == sdk::EModel::MODEL_2B || model == sdk::EModel::MODEL_9S || model == sdk::EModel::MODEL_A2;
+}
+
+// The android the local player controls right now. Early in the story the player often controls
+// something else (Flight Unit, hacking, scripted sequences), those can't be synchronized.
+sdk::Entity* get_local_character(sdk::EntityList* entity_list) {
+    auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (possessed == nullptr || possessed->behavior == nullptr || !possessed->behavior->is_pl0000()) {
+        return nullptr;
+    }
+
+    if (!is_character_model(possessed->behavior->model_index())) {
+        return nullptr;
+    }
+
+    return possessed;
+}
+
+const char* get_buddy_routine(uint32_t model) {
+    switch (model) {
+    case sdk::EModel::MODEL_2B:
+        return "buddy_2B";
+    case sdk::EModel::MODEL_9S:
+        return "buddy_9S";
+    case sdk::EModel::MODEL_A2:
+        return "buddy_A2";
+    default:
+        return nullptr;
+    }
+}
+}
+
 NierClient::NierClient(const std::string& host, const std::string& port, const std::string& name, const std::string& password)
     : m_hello_name{ name },
     m_password{ password }
@@ -25,13 +82,11 @@ NierClient::NierClient(const std::string& host, const std::string& port, const s
 
     set_trace_handler([](const std::string& s) { spdlog::info("{}", s); });
     
+    // Connecting is asynchronous: enetpp runs the connection on its own thread,
+    // callers poll is_connecting()/is_connected().
+    // The timeout is also the disconnect timeout, so keep it long enough for internet play.
     enet_uint16 port_num = static_cast<enet_uint16>(std::stoi(port));
-    connect(enetpp::client_connect_params().set_channel_count(1).set_server_host_name_and_port(host.c_str(), port_num).set_timeout(chrono::seconds(1)));
-
-    while (get_connection_state() == enetpp::CONNECT_CONNECTING) {
-        think();
-        this_thread::yield();
-    }
+    connect(enetpp::client_connect_params().set_channel_count(1).set_server_host_name_and_port(host.c_str(), port_num).set_timeout(chrono::seconds(10)));
 }
 
 NierClient::~NierClient() {
@@ -39,18 +94,99 @@ NierClient::~NierClient() {
     disconnect();
 }
 
-void NierClient::think() {
+void NierClient::pump() {
     std::scoped_lock _{m_mtx};
 
     consume_events(
         [this]() { on_connect(); },
         [this]() { on_disconnect(); },
-        [this](const enet_uint8* a, size_t b) { 
-            on_data_received(a, b); 
+        [this](const enet_uint8* a, size_t b) {
+            on_data_received(a, b);
         }
     );
+}
 
-    if (m_hello_sent && m_welcome_received && m_players.contains(m_guid)) {
+void NierClient::on_world_unloaded() {
+    std::scoped_lock _{m_mtx};
+
+    if (!m_in_world.exchange(false)) {
+        return;
+    }
+
+    spdlog::info("[Coop] World unloaded, dropping entity handles");
+
+    {
+        std::scoped_lock __{m_players_mutex};
+
+        for (auto& [guid, player] : m_players) {
+            if (player == nullptr || guid == m_guid) {
+                continue;
+            }
+
+            // The game destroys every entity on load, the puppets get rebound in sync_puppets.
+            player->set_handle(0);
+            player->set_story_buddy(false);
+        }
+
+        // Nothing to give back to the AI anymore, the entities are gone.
+        m_pending_destroy.clear();
+    }
+
+    if (m_network_entities != nullptr) {
+        m_network_entities = std::make_unique<EntitySync>(m_network_entities->get_max_guid());
+    }
+
+    m_next_bind_attempt.clear();
+    m_need_entity_announce = true;
+    m_swap_done = false;
+    m_swap_pending = false;
+}
+
+void NierClient::think() {
+    std::scoped_lock _{m_mtx};
+
+    m_in_game_thread = true;
+    ScopeExit __{[this] { m_in_game_thread = false; }};
+
+    m_in_world = true;
+
+    pump();
+
+    if (!is_connected()) {
+        return;
+    }
+
+    // Hello needs the model of our character, so it waits until we are in the world.
+    if (!m_hello_sent) {
+        send_hello();
+        return;
+    }
+
+    if (!m_welcome_received) {
+        return;
+    }
+
+    // Joined while not in the world, or came back from a loading screen:
+    // let the others know about the enemies around us.
+    if (m_need_entity_announce && m_network_entities != nullptr && sync_enemies) {
+        m_network_entities->on_enter_server(m_is_master_client);
+        m_need_entity_announce = false;
+    }
+
+    {
+        std::scoped_lock ___{m_players_mutex};
+
+        for (auto& player : m_pending_destroy) {
+            release_puppet(*player);
+        }
+
+        m_pending_destroy.clear();
+    }
+
+    try_coop_swap();
+    sync_puppets();
+
+    if (m_players.contains(m_guid)) {
         update_local_player_data();
         send_player_data();
 
@@ -65,10 +201,10 @@ void NierClient::think() {
 
             auto npc = networked_player->get_entity();
 
+            // Not bound yet, sync_puppets will retry.
             if (npc == nullptr) {
-                spdlog::error("NPC for player {} not found", networked_player->get_guid());
                 continue;
-            } 
+            }
 
             //spdlog::info("Synchronizing player {}", networkedPlayer->get_guid());
 
@@ -84,7 +220,9 @@ void NierClient::think() {
             //*npc->getPosition() = *(Vector3f*)&data.position();
         }
 
-        m_network_entities->think();
+        if (sync_enemies) {
+            m_network_entities->think();
+        }
     }
 }
 
@@ -172,21 +310,12 @@ void NierClient::on_frame() {
 }
 
 void NierClient::on_connect() {
-    if (auto ents = sdk::EntityList::get(); ents == nullptr || ents->get_possessed_entity() == nullptr) {
-        AutomataMPMod::get()->signal_destroy_client();
-        spdlog::error("Please spawn a player before connecting to the server.");
-        return;
-    }
-
-    //spdlog::set_default_logger(spdlog::basic_logger_mt("AutomataMPClient", "automatamp_clientlog.txt", true));
+    // Hello is sent from think() once our character exists, so connecting from the main menu is fine.
     spdlog::info("Connected");
-
-    if (!m_welcome_received && !m_hello_sent) {
-        send_hello();
-    }
 }
 
 void NierClient::on_disconnect() {
+    // AutomataMPMod::update_connection notices the failed state and tears the client down.
     spdlog::info("Disconnected");
 }
 
@@ -265,6 +394,11 @@ void NierClient::on_packet_received(const nier::Packet* packet) {
         case nier::PacketType_ID_DESTROY_ENTITY: [[fallthrough]];
         case nier::PacketType_ID_ENTITY_DATA: [[fallthrough]];
         case nier::PacketType_ID_ENTITY_ANIMATION_START: {
+            // Enemies only exist in the loaded world. The host re-announces its enemies after we load.
+            if (!can_touch_entities() || m_network_entities == nullptr || !sync_enemies) {
+                break;
+            }
+
             const auto entity_packet = flatbuffers::GetRoot<nier::EntityPacket>(packet->data()->data());
             flatbuffers::Verifier entity_verif(packet->data()->data(), packet->data()->size());
 
@@ -483,6 +617,11 @@ void NierClient::send_entity_animation_start(uint32_t guid, uint32_t anim, uint3
 }
 
 void NierClient::on_entity_created(sdk::Entity* entity, sdk::EntitySpawnParams* data) {
+    // Without enemy sync the enemies of our own story stay as they are.
+    if (m_network_entities == nullptr || !sync_enemies) {
+        return;
+    }
+
     if (!m_is_master_client) {
         entity->behavior->terminate(); // destroy the entity. only the server or the master client should create entities.
         return;
@@ -492,18 +631,34 @@ void NierClient::on_entity_created(sdk::Entity* entity, sdk::EntitySpawnParams* 
 }
 
 void NierClient::on_entity_deleted(sdk::Entity* entity) {
+    if (m_network_entities == nullptr) {
+        return;
+    }
+
     m_network_entities->on_entity_deleted(entity);
 }
 
 void NierClient::send_hello() {
     auto ents = sdk::EntityList::get();
-    auto possessed = ents->get_possessed_entity();
+    auto possessed = ents != nullptr ? ents->get_possessed_entity() : nullptr;
 
     if (possessed == nullptr || possessed->behavior == nullptr) {
         spdlog::error("No possessed entity");
         return;
     }
-    
+
+    // The server disconnects anyone announcing something other than 2B/9S/A2,
+    // so never send the model of a Flight Unit or similar.
+    uint32_t model = sdk::EModel::MODEL_2B;
+
+    if (auto character = get_local_character(ents); character != nullptr) {
+        model = character->behavior->model_index();
+    } else if (auto player = ents->get_by_name("Player");
+               player != nullptr && player->behavior != nullptr && player->behavior->is_pl0000() && is_character_model(player->behavior->model_index())) {
+        model = player->behavior->model_index();
+    }
+
+    spdlog::info("[Coop] Hello: controlling model {:x}, announcing model {:x}", possessed->behavior->model_index(), model);
 
     flatbuffers::FlatBufferBuilder builder{};
     const auto name_pkt = builder.CreateString(m_hello_name);
@@ -515,7 +670,7 @@ void NierClient::send_hello() {
     hello_builder.add_patch(nier::VersionPatch_Value);
     hello_builder.add_name(name_pkt);
     hello_builder.add_password(pwd_pkt);
-    hello_builder.add_model(possessed->behavior->model_index());
+    hello_builder.add_model(model);
 
     builder.Finish(hello_builder.Finish());
 
@@ -541,13 +696,11 @@ void NierClient::update_local_player_data() {
         return;
     }
 
-    auto player = entity_list->get_possessed_entity();
+    // No character to synchronize right now (Flight Unit, hacking...): pause sending player data.
+    auto player = get_local_character(entity_list);
+    m_has_local_character = player != nullptr;
 
-    if (player == nullptr) {
-        return;
-    }
-
-    it->second->set_handle(player->handle);
+    it->second->set_handle(player != nullptr ? player->handle : 0);
 }
 
 void NierClient::send_player_data() {
@@ -567,8 +720,8 @@ void NierClient::send_player_data() {
     
     auto entity = player->get_entity();
 
+    // Not controlling a character right now, see update_local_player_data.
     if (entity == nullptr) {
-        spdlog::error("Cannot send player data without entity");
         return;
     }
 
@@ -600,34 +753,19 @@ bool NierClient::handle_welcome(const nier::Packet* packet) {
     spdlog::info("Welcome packet received, isMasterClient: {}, guid: {}", m_is_master_client, m_guid);
 
     m_network_entities = std::make_unique<EntitySync>(highest_guid);
-    m_network_entities->on_enter_server(m_is_master_client);
+
+    // Otherwise think() does it as soon as we are back in the world.
+    if (can_touch_entities()) {
+        m_network_entities->on_enter_server(m_is_master_client);
+    } else {
+        m_need_entity_announce = true;
+    }
 
     return true;
 }
 
 bool NierClient::handle_create_player(const nier::Packet* packet) {
     spdlog::info("Create player packet received");
-
-    auto entity_list = sdk::EntityList::get();
-
-    if (entity_list == nullptr) {
-        spdlog::error("Entity list not found while handling create player packet");
-        return false;
-    }
-
-    auto possessed = entity_list->get_possessed_entity();
-
-    if (possessed == nullptr) {
-        spdlog::error("Possessed entity not found while handling create player packet");
-        return false;
-    }
-
-    auto localplayer = entity_list->get_by_name("Player");
-
-    if (localplayer == nullptr || localplayer->behavior == nullptr) {
-        spdlog::info("Player not found while handling create player packet");
-        return false;
-    }
 
     const auto create_player = flatbuffers::GetRoot<nier::CreatePlayer>(packet->data()->data());
     auto verif = flatbuffers::Verifier(packet->data()->data(), packet->data()->size());
@@ -637,56 +775,18 @@ bool NierClient::handle_create_player(const nier::Packet* packet) {
         return false;
     }
 
-    {
-        std::scoped_lock _{m_players_mutex};
+    std::scoped_lock _{m_players_mutex};
 
-        auto new_player = std::make_unique<Player>();
-        new_player->set_guid(create_player->guid());
-        new_player->set_name(create_player->name()->c_str());
+    auto new_player = std::make_unique<Player>();
+    new_player->set_guid(create_player->guid());
+    new_player->set_name(create_player->name()->c_str());
+    new_player->set_model(create_player->model());
 
-        m_players[create_player->guid()] = std::move(new_player);
-    }
+    spdlog::info(" Player {} ({}), model {:x}", create_player->guid(), create_player->name()->c_str(), create_player->model());
 
-    // we don't want to spawn ourselves
-    if (create_player->guid() != m_guid) {
-        spdlog::info("Spawning player {}, {}", create_player->guid(), create_player->name()->c_str());
+    m_players[create_player->guid()] = std::move(new_player);
 
-        MidHooks::s_ignore_spawn = true;
-        auto ent = entity_list->spawn_entity("partner", create_player->model(), possessed->behavior->position());
-        MidHooks::s_ignore_spawn = false;
-
-        if (ent != nullptr) {
-            std::scoped_lock _{m_players_mutex};
-
-            spdlog::info(" Player spawned");
-
-            ent->behavior->as<sdk::Pl0000>()->buddy_handle() = localplayer->handle;
-            localplayer->behavior->as<sdk::Pl0000>()->buddy_handle() = ent->handle;
-
-            ent->behavior->setSuspend(false);
-
-            ent->assign_ai_routine("PLAYER");
-            ent->assign_ai_routine("player");
-
-            // alternate way of assigning AI/control to the entity easily.
-            localplayer->behavior->as<sdk::Pl0000>()->changePlayer();
-            localplayer->behavior->as<sdk::Pl0000>()->changePlayer();
-
-            ent->behavior->obj_flags() = -1;
-            ent->behavior->as<sdk::Pl0000>()->setBuddyFromNpc();
-            ent->behavior->obj_flags() = 0;
-
-            m_players[create_player->guid()]->set_start_tick(ent->behavior->tick_count());
-            m_players[create_player->guid()]->set_handle(ent->handle);
-
-            spdlog::info(" player assigned handle {:x}", ent->handle);
-        } else {
-            spdlog::error("Failed to spawn partner");
-        }
-    } else {
-        spdlog::info("not spawning self");
-    }
-
+    // The entity is bound in sync_puppets, which runs on the game thread once the world is loaded.
     return true;
 }
 
@@ -697,25 +797,319 @@ bool NierClient::handle_destroy_player(const nier::Packet* packet) {
 
     std::scoped_lock _{m_players_mutex};
 
-    if (m_players.contains(destroy_player->guid()) && m_players[destroy_player->guid()] != nullptr) {
-        auto entity_list = sdk::EntityList::get();
+    auto it = m_players.find(destroy_player->guid());
 
-        if (entity_list == nullptr) {
-            // not an error, we just won't actually delete any entity from the entity list
-            spdlog::info("Entity list not found while handling destroy player packet");
-        } else {
-            auto localplayer = entity_list->get_by_name("Player");
-            auto ent = entity_list->get_by_handle(m_players[destroy_player->guid()]->get_handle());
-            if (ent != nullptr && ent != localplayer) {
-                ent->behavior->terminate();
-            }
+    if (it == m_players.end()) {
+        return true;
+    }
+
+    // Releasing touches game entities, so it's done in think().
+    if (it->second != nullptr && it->second->get_handle() != 0) {
+        m_pending_destroy.push_back(std::move(it->second));
+    }
+
+    m_players.erase(it);
+    m_next_bind_attempt.erase(destroy_player->guid());
+
+    return true;
+}
+
+Player* NierClient::get_host_player() {
+    // The server makes the first player to join the master client, and guids only grow,
+    // so the remote player with the lowest guid is the host.
+    Player* host = nullptr;
+
+    for (auto& [guid, player] : m_players) {
+        if (player == nullptr || guid == m_guid) {
+            continue;
+        }
+
+        if (host == nullptr || guid < host->get_guid()) {
+            host = player.get();
         }
     }
 
-    m_players[destroy_player->guid()].reset();
-    m_players.erase(destroy_player->guid());
+    return host;
+}
+
+void NierClient::try_coop_swap() {
+    if (m_is_master_client || m_swap_done || !auto_swap_character) {
+        return;
+    }
+
+    std::scoped_lock _{m_players_mutex};
+
+    const auto host = get_host_player();
+
+    if (host == nullptr) {
+        return;
+    }
+
+    auto entity_list = sdk::EntityList::get();
+    auto possessed = get_local_character(entity_list);
+
+    // Wait until we control a character, the swap is decided once per world load.
+    if (possessed == nullptr) {
+        return;
+    }
+
+    m_swap_done = true;
+
+    auto local = possessed->behavior->as<sdk::Pl0000>();
+
+    if (local->model_index() != host->get_model()) {
+        spdlog::info("[Coop] Already playing a different character than the host, no swap needed");
+        return;
+    }
+
+    auto buddy = entity_list->get_by_handle(local->buddy_handle());
+
+    if (buddy == nullptr || buddy == possessed || buddy->behavior == nullptr || !buddy->behavior->is_pl0000() ||
+        !is_character_model(buddy->behavior->model_index()) || buddy->behavior->model_index() == local->model_index()) {
+        spdlog::info("[Coop] Same character as the host but no story buddy to take over, staying on the current character");
+        return;
+    }
+
+    spdlog::info("[Coop] Taking control of the story buddy {:x}", buddy->behavior->model_index());
+
+    // The game's own player <-> buddy switch.
+    m_swap_from_handle = possessed->handle;
+    m_swap_wait_thinks = 0;
+    m_swap_pending = true;
+    local->changePlayer();
+}
+
+void NierClient::sync_puppets() {
+    if (!can_touch_entities()) {
+        return;
+    }
+
+    // Wait for the character switch to happen, otherwise we would bind the character we are about to control.
+    if (m_swap_pending) {
+        auto entity_list = sdk::EntityList::get();
+        auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+        if ((possessed != nullptr && possessed->handle != m_swap_from_handle) || ++m_swap_wait_thinks > 120) {
+            m_swap_pending = false;
+        } else {
+            return;
+        }
+    }
+
+    std::scoped_lock _{m_players_mutex};
+
+    const auto now = std::chrono::steady_clock::now();
+
+    auto entity_list = sdk::EntityList::get();
+    auto possessed = get_local_character(entity_list);
+
+    for (auto& [guid, player] : m_players) {
+        if (player == nullptr || guid == m_guid) {
+            continue;
+        }
+
+        if (auto npc = player->get_entity(); npc != nullptr) {
+            if (!player->is_story_buddy()) {
+                continue;
+            }
+
+            // The story decides where the buddy is: give it back once it's no longer our buddy
+            // (story moved on, Flight Unit, hacking...) or the game suspended it.
+            const auto buddy_handle = possessed != nullptr ? possessed->behavior->as<sdk::Pl0000>()->buddy_handle() : 0;
+            const auto buddy_is_puppet = std::any_of(m_players.begin(), m_players.end(), [&](auto& it) {
+                return it.second != nullptr && it.first != m_guid && it.second->get_handle() == buddy_handle;
+            });
+
+            if (possessed != nullptr && buddy_is_puppet && npc->isSuspend() == 0) {
+                continue;
+            }
+
+            spdlog::info("[Coop] Story buddy of {} is no longer ours, returning it to the game", player->get_name());
+
+            release_puppet(*player);
+            m_next_bind_attempt[guid] = now + std::chrono::seconds(2);
+            continue;
+        }
+
+        if (auto it = m_next_bind_attempt.find(guid); it != m_next_bind_attempt.end() && now < it->second) {
+            continue;
+        }
+
+        player->set_handle(0);
+        player->set_story_buddy(false);
+
+        if (!bind_puppet(*player)) {
+            m_next_bind_attempt[guid] = now + std::chrono::seconds(2);
+        }
+    }
+}
+
+bool NierClient::bind_puppet(Player& player) {
+    auto entity_list = sdk::EntityList::get();
+
+    if (entity_list == nullptr) {
+        return false;
+    }
+
+    // Puppets are only bound while we control a character, it's retried later otherwise.
+    auto possessed = get_local_character(entity_list);
+
+    if (possessed == nullptr) {
+        return false;
+    }
+
+    auto local = possessed->behavior->as<sdk::Pl0000>();
+
+    // Preferred: the buddy the game already gave us (9S next to 2B and so on).
+    if (use_story_buddy) {
+        auto buddy = entity_list->get_by_handle(local->buddy_handle());
+
+        const auto taken = buddy != nullptr && std::any_of(m_players.begin(), m_players.end(), [&](auto& it) {
+            return it.second != nullptr && it.second.get() != &player && it.second->get_handle() == buddy->handle;
+        });
+
+        if (buddy != nullptr && buddy != possessed && !taken && buddy->behavior != nullptr && buddy->behavior->is_pl0000() &&
+            is_character_model(buddy->behavior->model_index())) {
+            // The game keeps the buddy suspended while it isn't part of the scene. Wait for the story
+            // instead of spawning a partner, which would replace the story buddy of the local player.
+            if (buddy->behavior->isSuspend() != 0) {
+                return false;
+            }
+
+            // Taking over teleports the buddy to the other player. If that player is far from where our
+            // story placed the buddy, our games are at different points: leave the buddy to the story
+            // until the other player gets close.
+            const auto remote_position = *(Vector3f*)&player.get_player_data().position();
+
+            if (glm::length(remote_position - buddy->behavior->position()) > 50.0f) {
+                return false;
+            }
+
+            spdlog::info("[Coop] {} takes over the story buddy (model {:x})", player.get_name(), buddy->behavior->model_index());
+
+            // Same AI routines as the spawned partners use, the network input drives the character from now on.
+            buddy->assign_ai_routine("PLAYER");
+            buddy->assign_ai_routine("player");
+
+            player.set_handle(buddy->handle);
+            player.set_story_buddy(true);
+            player.set_start_tick(buddy->behavior->tick_count());
+
+            return true;
+        }
+    }
+
+    // No story buddy right now (prologue, Flight Unit...): wait for the game to give us one.
+    if (!spawn_partner) {
+        return false;
+    }
+
+    auto localplayer = entity_list->get_by_name("Player");
+
+    if (localplayer == nullptr || localplayer->behavior == nullptr || !localplayer->behavior->is_pl0000()) {
+        return false;
+    }
+
+    // No buddy available: spawn a partner. Use the counterpart character if both play the same one.
+    auto model = player.get_model();
+
+    if (!is_character_model(model) || model == local->model_index()) {
+        model = get_counterpart_model(local->model_index());
+    }
+
+    spdlog::info("[Coop] Spawning partner for {} (model {:x})", player.get_name(), model);
+
+    MidHooks::s_ignore_spawn = true;
+    auto ent = entity_list->spawn_entity("partner", model, possessed->behavior->position());
+    MidHooks::s_ignore_spawn = false;
+
+    if (ent == nullptr) {
+        spdlog::error("Failed to spawn partner");
+        return false;
+    }
+
+    ent->behavior->as<sdk::Pl0000>()->buddy_handle() = localplayer->handle;
+    localplayer->behavior->as<sdk::Pl0000>()->buddy_handle() = ent->handle;
+
+    ent->behavior->setSuspend(false);
+
+    ent->assign_ai_routine("PLAYER");
+    ent->assign_ai_routine("player");
+
+    // alternate way of assigning AI/control to the entity easily.
+    localplayer->behavior->as<sdk::Pl0000>()->changePlayer();
+    localplayer->behavior->as<sdk::Pl0000>()->changePlayer();
+
+    ent->behavior->obj_flags() = -1;
+    ent->behavior->as<sdk::Pl0000>()->setBuddyFromNpc();
+    ent->behavior->obj_flags() = 0;
+
+    player.set_start_tick(ent->behavior->tick_count());
+    player.set_handle(ent->handle);
+
+    spdlog::info(" player assigned handle {:x}", ent->handle);
 
     return true;
+}
+
+void NierClient::release_puppet(Player& player) {
+    auto entity_list = sdk::EntityList::get();
+    auto npc = player.get_entity();
+
+    if (entity_list == nullptr || npc == nullptr) {
+        return;
+    }
+
+    auto ent = npc->get_entity();
+
+    if (!player.is_story_buddy()) {
+        if (ent != entity_list->get_by_name("Player")) {
+            npc->terminate();
+        }
+
+        return;
+    }
+
+    // Give the story buddy back to the game.
+    spdlog::info("[Coop] Returning the story buddy of {} to the AI", player.get_name());
+
+    std::memset(&npc->character_controller().buttons, 0, sizeof(npc->character_controller().buttons));
+    npc->character_controller().held_flags = 0;
+    npc->run_speed_type() = regenny::ERunSpeedType::SPEED_BUDDY;
+
+    if (const auto routine = get_buddy_routine(npc->model_index()); routine != nullptr) {
+        ent->assign_ai_routine(routine);
+    }
+
+    ent->assign_ai_routine("buddy");
+
+    player.set_handle(0);
+    player.set_story_buddy(false);
+}
+
+void NierClient::release_puppets() {
+    std::scoped_lock _{m_mtx};
+
+    if (!m_in_world) {
+        return;
+    }
+
+    m_in_game_thread = true;
+    ScopeExit __{[this] { m_in_game_thread = false; }};
+
+    std::scoped_lock ___{m_players_mutex};
+
+    for (auto& player : m_pending_destroy) {
+        release_puppet(*player);
+    }
+
+    m_pending_destroy.clear();
+
+    for (auto& [guid, player] : m_players) {
+        if (player != nullptr && guid != m_guid) {
+            release_puppet(*player);
+        }
+    }
 }
 
 bool NierClient::handle_create_entity(const nier::EntityPacket* packet) {
@@ -837,7 +1231,8 @@ bool NierClient::handle_player_data(const nier::PlayerPacket* packet) {
     }
 
     auto player_data = flatbuffers::GetRoot<nier::PlayerData>(packet->data()->data());
-    auto npc = player_networked->get_entity();
+    // Outside the game thread we only keep the data, the next think() applies it.
+    auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
 
     if (npc != nullptr) {
         npc->position() = *(Vector3f*)&player_data->position();
@@ -869,7 +1264,8 @@ bool NierClient::handle_animation_start(const nier::PlayerPacket* packet) {
     }
 
     auto animation_data = flatbuffers::GetRoot<nier::AnimationStart>(packet->data()->data());
-    auto npc = player_networked->get_entity();
+    // Outside the game thread we only keep the data, the next think() applies it.
+    auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
 
     if (npc != nullptr) {
         switch (animation_data->anim()) {
@@ -912,7 +1308,8 @@ bool NierClient::handle_buttons(const nier::PlayerPacket* packet) {
     }
 
     auto buttons = flatbuffers::GetRoot<nier::Buttons>(packet->data()->data());
-    auto npc = player_networked->get_entity();
+    // Outside the game thread we only keep the data, the next think() applies it.
+    auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
 
     if (npc != nullptr) {
         const auto buttons_data = buttons->buttons()->data();

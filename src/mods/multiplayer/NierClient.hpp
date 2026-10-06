@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <unordered_map>
 
 #include <enetpp/client.h>
@@ -19,10 +21,24 @@ public:
         const std::string& password = "");
     virtual ~NierClient();
 
+    // Game thread only. Handles packets and drives the puppets.
     void think();
+    // Safe from any thread. Only drains network events, never touches game entities.
+    // Used while the world is not available (main menu, loading screens).
+    void pump();
+    // Forget every entity handle we hold. Called when the game starts loading.
+    void on_world_unloaded();
+    // Game thread only. Gives story buddies back to the game's AI before disconnecting.
+    void release_puppets();
+
     void on_draw_ui();
     void on_frame();
     bool is_connected() { return get_connection_state() == enetpp::CONNECT_CONNECTED; }
+    bool is_connecting() { return get_connection_state() == enetpp::CONNECT_CONNECTING; }
+    bool is_in_world() const { return m_in_world; }
+    bool is_in_session() const { return m_welcome_received; }
+    // False while the player controls something that isn't 2B/9S/A2 (Flight Unit, hacking...).
+    bool has_local_character() const { return m_has_local_character; }
 
     void send_packet(nier::PacketType id, const uint8_t* data = nullptr, size_t size = 0);
     void send_animation_start(uint32_t anim, uint32_t variant, uint32_t a3, uint32_t a4);
@@ -48,6 +64,12 @@ public:
     const auto& get_players() const {
         return m_players;
     }
+
+    // Co-op options.
+    bool use_story_buddy{true}; // Puppet the game's own buddy (e.g. 9S) instead of spawning a new partner.
+    bool auto_swap_character{true}; // Client takes over the buddy if it plays the same character as the host.
+    bool spawn_partner{false}; // Spawn a "partner" for the other player when the game gives us no story buddy.
+    bool sync_enemies{false}; // Enemies come from the master client. Otherwise everyone keeps the enemies of their own story.
 
 private:
     void on_connect();
@@ -75,6 +97,13 @@ private:
     bool handle_animation_start(const nier::PlayerPacket* packet);
     bool handle_buttons(const nier::PlayerPacket* packet);
 
+    bool can_touch_entities() const { return m_in_game_thread && m_in_world; }
+    Player* get_host_player();
+    void try_coop_swap();
+    void sync_puppets();
+    bool bind_puppet(Player& player);
+    void release_puppet(Player& player);
+
     std::unique_ptr<EntitySync> m_network_entities{};
 
     std::recursive_mutex m_mtx{};
@@ -89,4 +118,17 @@ private:
     uint64_t m_guid{};
 
     std::unordered_map<uint64_t, std::unique_ptr<Player>> m_players{};
+    std::vector<std::unique_ptr<Player>> m_pending_destroy{};
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> m_next_bind_attempt{};
+
+    std::atomic<bool> m_in_world{false};
+    bool m_in_game_thread{false};
+    bool m_need_entity_announce{false};
+    bool m_has_local_character{false};
+
+    // Client character swap (2B -> 9S) state, reset on every world load.
+    bool m_swap_done{false};
+    bool m_swap_pending{false};
+    uint32_t m_swap_from_handle{0};
+    uint32_t m_swap_wait_thinks{0};
 };

@@ -206,6 +206,15 @@ void MidHooks::on_processed_buttons(safetyhook::Context& context) {
     auto entity = Address(context.rbx).get(-0xCA0).as<sdk::Pl0000*>();
 
     if (m_overriden_entities.count(entity) != 0) {
+        // Only send the buttons of the character we control right now. After a player <-> buddy
+        // switch the old character is still in the set but is driven by the network.
+        auto entity_list = sdk::EntityList::get();
+        auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+        if (possessed == nullptr || possessed->behavior != entity) {
+            return;
+        }
+
         const auto amp = AutomataMPMod::get();
         auto& client = amp->get_client();
 
@@ -223,8 +232,9 @@ void MidHooks::on_processed_buttons(safetyhook::Context& context) {
 }
 
 sdk::Entity* MidHooks::on_entity_spawn(void* rcx, void* rdx) {
-    scoped_lock _(m_spawn_mutex);
-
+    // No lock may be held while calling into the game: when a cutscene starts the game spawns
+    // from several threads and waits on its own locks inside the spawn function, a mutex held
+    // across the call deadlocks the game. EntitySync has its own locking for the bookkeeping.
     auto spawnParams = (sdk::EntitySpawnParams*)rdx;
     auto entity = m_entity_spawn_hook->call<sdk::Entity*, void*, void*>(rcx, rdx);
 
@@ -247,8 +257,6 @@ sdk::Entity* MidHooks::on_entity_spawn(void* rcx, void* rdx) {
 }
 
 void MidHooks::on_entity_terminate(safetyhook::Context& context) {
-    scoped_lock _(m_spawn_mutex);
-
     auto ent = (sdk::Entity*)context.rcx;
 
     AutomataMPMod::get()->on_entity_deleted(ent);

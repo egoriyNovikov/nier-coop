@@ -68,8 +68,21 @@ Entity* EntityList::get_by_name(const std::string& name) {
 }
 
 Entity* EntityList::get_by_handle(uint32_t handle) {
+    if (handle == 0) {
+        return nullptr;
+    }
+
     auto index = (uint16_t)(handle >> 8);
-    return m_entities[index].ent;
+    const auto& descriptor = m_entities[index];
+    auto ent = descriptor.ent;
+
+    // The slot may have been reused by another entity (e.g. after a level load).
+    // Same check the game does (see the EntityList pattern): everything but the low byte must match.
+    if (ent == nullptr || ((descriptor.handle ^ handle) & 0xFFFFFF00) != 0) {
+        return nullptr;
+    }
+
+    return ent;
 }
 
 Entity* EntityList::get_possessed_entity() {
