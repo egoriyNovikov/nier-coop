@@ -285,7 +285,15 @@ void AutomataMPMod::update_connection() {
         }
 
         if (!m_client->is_in_session()) {
-            m_coop_status = "Connected. Waiting for your character to be in the world...";
+            if (m_client->is_hello_unanswered(std::chrono::seconds(10))) {
+                m_coop_status = "Connected, but the server does not answer. It may be an older version of the server";
+
+                if (m_is_hosting) {
+                    m_coop_status += ": replace automatamp_server\\server.exe in the game folder with the one from this mod version";
+                }
+            } else {
+                m_coop_status = "Connected. Waiting for your character to be in the world...";
+            }
         } else {
             if (m_client->is_master_client()) {
                 m_coop_status = "In session. You lead the story";
@@ -312,6 +320,11 @@ void AutomataMPMod::update_connection() {
     // The server told us why, retrying would not help.
     if (const auto& reason = m_client->get_reject_reason(); !reason.empty()) {
         m_coop_status = "Could not join: " + reason;
+
+        if (m_is_hosting && m_client->is_version_rejected()) {
+            m_coop_status += ". Your own server is outdated: replace automatamp_server\\server.exe in the game folder "
+                             "with the one from this mod version";
+        }
         m_pending_connect.reset();
     } else if (was_in_session) {
         m_coop_status = "Connection lost";

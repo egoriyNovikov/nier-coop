@@ -49,6 +49,11 @@ public:
     bool has_local_character() const { return m_has_local_character; }
     // Why the server refused us, empty if it didn't.
     const std::string& get_reject_reason() const { return m_reject_reason; }
+    bool is_version_rejected() const { return m_version_rejected; }
+    // Hello went out long ago and the server neither welcomed nor rejected us.
+    bool is_hello_unanswered(std::chrono::steady_clock::duration timeout) const {
+        return m_hello_sent && !m_welcome_received && m_reject_reason.empty() && std::chrono::steady_clock::now() - m_hello_sent_at > timeout;
+    }
     uint32_t get_session_id() const { return m_session_id; }
     // Name of the remote player leading the story, empty if we lead or nobody does.
     std::string get_leader_name();
@@ -205,10 +210,12 @@ private:
     std::string m_password{};
     bool m_wants_host{false};
     std::string m_reject_reason{};
+    bool m_version_rejected{false};
     uint32_t m_session_id{0};
 
     bool m_welcome_received{ false };
     bool m_hello_sent{ false };
+    std::chrono::steady_clock::time_point m_hello_sent_at{};
 
     bool m_is_master_client{false};
     uint64_t m_guid{};

@@ -1012,6 +1012,7 @@ void NierClient::send_hello() {
 
     send_packet(nier::PacketType_ID_HELLO, builder.GetBufferPointer(), builder.GetSize());
     m_hello_sent = true;
+    m_hello_sent_at = std::chrono::steady_clock::now();
 }
 
 void NierClient::update_local_player_data() {
@@ -1207,6 +1208,8 @@ bool NierClient::handle_reject(const nier::Packet* packet) {
         auto verif = flatbuffers::Verifier(packet->data()->data(), packet->data()->size());
 
         if (reject->Verify(verif)) {
+            m_version_rejected = reject->reason() == nier::RejectReason_VersionMismatch;
+
             if (auto it = reasons.find(reject->reason()); it != reasons.end()) {
                 m_reject_reason = it->second;
             }

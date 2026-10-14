@@ -108,6 +108,8 @@ std::optional<std::string> CoopServer::start(const std::string& port, const std:
 void CoopServer::stop() {
     if (m_process != nullptr) {
         TerminateProcess(m_process, 0);
+        // Termination is asynchronous: wait until the old server lets go of the port and server_log.txt.
+        WaitForSingleObject(m_process, 2000);
         CloseHandle(m_process);
         m_process = nullptr;
 
