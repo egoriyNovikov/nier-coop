@@ -16,6 +16,8 @@
 #include <sdk/Game.hpp>
 #include <sdk/ScriptFunctions.hpp>
 #include "AutomataMPMod.hpp"
+#include "Version.hpp"
+#include "multiplayer/ScriptTracer.hpp"
 
 using namespace std;
 
@@ -39,7 +41,7 @@ AutomataMPMod::~AutomataMPMod() {
 }
 
 std::optional<std::string> AutomataMPMod::on_initialize() try {
-    spdlog::info("Entering AutomataMPMod.");
+    spdlog::info("Entering AutomataMPMod {}", AUTOMATAMP_FULL_VERSION);
 
     std::strcpy(m_ip_connect_input.data(), DEFAULT_IP);
     std::strcpy(m_port_connect_input.data(), DEFAULT_PORT);
@@ -119,7 +121,7 @@ void AutomataMPMod::display_servers() {
 			strcpy(m_ip_connect_input.data(), server->ip.c_str());
             strcpy(m_port_connect_input.data(), server->port.c_str());
 
-            start_connect(server->ip, server->port, false);
+            start_connect(server->ip, server->port, false, false);
 
             ImGui::PopID();
             return;
@@ -185,7 +187,7 @@ void AutomataMPMod::display_manual_connect() {
             return;
         }
 
-        start_connect(val_ip, val_port, false);
+        start_connect(val_ip, val_port, false, false);
     }
 
     ImGui::InputText("Connect Port", m_port_connect_input.data(), m_port_connect_input.size());
@@ -193,7 +195,7 @@ void AutomataMPMod::display_manual_connect() {
     ImGui::InputText("Password", m_password_input.data(), m_password_input.size());
 }
 
-void AutomataMPMod::start_connect(const std::string& host, const std::string& port, bool is_host) {
+void AutomataMPMod::start_connect(const std::string& host, const std::string& port, bool is_host, bool wants_host) {
     std::scoped_lock _{m_client_mutex};
 
     if (m_client != nullptr) {
@@ -206,6 +208,7 @@ void AutomataMPMod::start_connect(const std::string& host, const std::string& po
         port,
         std::chrono::steady_clock::now() + (is_host ? std::chrono::milliseconds(500) : std::chrono::milliseconds(0)),
         is_host ? 5 : 1,
+        wants_host,
     };
 
     m_coop_status = "Connecting to " + host + ":" + port + "...";
@@ -245,7 +248,8 @@ void AutomataMPMod::update_connection() {
         spdlog::info("[Coop] Connecting to {}:{}", m_pending_connect->host, m_pending_connect->port);
 
         try {
-            m_client = make_unique<NierClient>(m_pending_connect->host, m_pending_connect->port, m_name_input.data(), m_password_input.data());
+            m_client = make_unique<NierClient>(m_pending_connect->host, m_pending_connect->port, m_name_input.data(), m_password_input.data(),
+                m_pending_connect->wants_host);
         } catch (const std::exception& e) {
             m_coop_status = std::string{"Invalid address: "} + e.what();
             m_pending_connect.reset();
@@ -263,6 +267,9 @@ void AutomataMPMod::update_connection() {
     m_client->auto_swap_character = m_coop_auto_swap;
     m_client->spawn_partner = m_coop_spawn_partner;
     m_client->sync_enemies = m_coop_sync_enemies;
+    m_client->puppet_as_player = m_coop_puppet_as_player;
+    m_client->smooth_puppet_position = m_coop_smooth_position;
+    m_client->share_enemy_deaths = m_coop_share_enemy_deaths;
 
     if (!in_world) {
         m_client->pump();
@@ -280,7 +287,15 @@ void AutomataMPMod::update_connection() {
         if (!m_client->is_in_session()) {
             m_coop_status = "Connected. Waiting for your character to be in the world...";
         } else {
-            m_coop_status = m_client->is_master_client() ? "In session (host)" : "In session";
+            if (m_client->is_master_client()) {
+                m_coop_status = "In session. You lead the story";
+            } else if (const auto leader = m_client->get_leader_name(); !leader.empty()) {
+                m_coop_status = "In session. " + leader + " leads the story";
+            } else {
+                m_coop_status = "In session. Nobody leads the story: waiting for the host to join";
+            }
+
+            m_coop_status += " (session " + std::to_string(m_client->get_session_id()) + ")";
 
             if (!m_client->has_local_character()) {
                 m_coop_status += ". Sync paused: you are not controlling 2B/9S/A2 right now";
@@ -294,7 +309,11 @@ void AutomataMPMod::update_connection() {
     const auto was_in_session = m_client->is_in_session();
     m_wants_destroy_client = true;
 
-    if (was_in_session) {
+    // The server told us why, retrying would not help.
+    if (const auto& reason = m_client->get_reject_reason(); !reason.empty()) {
+        m_coop_status = "Could not join: " + reason;
+        m_pending_connect.reset();
+    } else if (was_in_session) {
         m_coop_status = "Connection lost";
         m_pending_connect.reset();
     } else if (m_pending_connect && m_pending_connect->attempts_left > 0) {
@@ -376,7 +395,7 @@ void AutomataMPMod::display_coop() {
             m_coop_status = *error;
         } else {
             m_is_hosting = true;
-            start_connect(DEFAULT_IP, m_host_port_input.data(), true);
+            start_connect(DEFAULT_IP, m_host_port_input.data(), true, true);
         }
     }
 
@@ -395,17 +414,25 @@ void AutomataMPMod::display_coop() {
         if (address.empty() || port.empty() || !std::all_of(port.begin(), port.end(), ::isdigit)) {
             m_coop_status = "Enter the address as IP:port, for example 192.168.1.10:6969";
         } else {
-            start_connect(address, port, false);
+            start_connect(address, port, false, m_join_as_host);
         }
     }
+
+    ImGui::SameLine();
+    ImGui::Checkbox("I am the host (I lead the story)", &m_join_as_host);
 
     ImGui::Separator();
     ImGui::Checkbox("Partner controls my story buddy", &m_coop_use_story_buddy);
     ImGui::Checkbox("Take over the buddy if I play the host's character", &m_coop_auto_swap);
     ImGui::Checkbox("Spawn a partner when there is no story buddy", &m_coop_spawn_partner);
+    ImGui::Checkbox("Shared enemy deaths: an enemy killed in one game dies in the other", &m_coop_share_enemy_deaths);
     ImGui::Checkbox("Shared enemies from the host (both players must enable it)", &m_coop_sync_enemies);
+    ImGui::Checkbox("Partner animations: drive the partner like a player", &m_coop_puppet_as_player);
+    ImGui::Checkbox("Smooth partner movement (off: snap to every network position)", &m_coop_smooth_position);
     ImGui::TextWrapped("You can connect from the main menu, your character joins once you are in the world. "
-                       "The host should join first. Both players should load the same save.");
+                       "On a dedicated server both press Join Game, the player leading the story ticks "
+                       "\"I am the host\", the order does not matter. Both players should load the same save.");
+    ImGui::TextDisabled("Mod version %s", AUTOMATAMP_FULL_VERSION);
 }
 
 void AutomataMPMod::on_draw_ui() {
@@ -421,6 +448,12 @@ void AutomataMPMod::on_draw_ui() {
 
     if (!lock.owns_lock()) {
         return;
+    }
+
+    ImGui::Checkbox("Debug hotkeys (F3 suspend, F4/F9/F10 partner, F6 swap, F7 buddy)", &m_debug_hotkeys);
+
+    if (ImGui::Checkbox("Trace story script calls to the log (debug, the first enable takes a few seconds)", &m_trace_scripts)) {
+        ScriptTracer::get().set_enabled(m_trace_scripts);
     }
 
     if (m_client) {
@@ -505,43 +538,40 @@ void AutomataMPMod::on_think() {
     auto player = entity_list->get_by_name("Player");
 
     if (!player) {
-        spdlog::info("Player not found");
+        log_world_state("Player not found");
         return;
     }
 
+    if (m_debug_hotkeys) {
+        debug_hotkeys(entity_list, player);
+    }
+
+    shared_think();
+}
+
+// Developer keys, off by default: they suspend the player, swap characters and spawn entities.
+void AutomataMPMod::debug_hotkeys(sdk::EntityList* entity_list, sdk::Entity* player) {
     auto partners = entity_list->get_all_by_name("partner");
-    auto partner = entity_list->get_by_name("partner");
 
-    if (partner) {
-        if (utility::was_key_down(VK_F4)) {
-            Vector3f* my_pos = Address(player->behavior).get(0x50).as<Vector3f*>();
-
-            for (auto i : partners) {
-                if (!i->behavior) {
-                    continue;
-                }
-
-                Vector3f* vec = Address(i->behavior).get(0x50).as<Vector3f*>();
-                *vec = *my_pos;
+    if (utility::was_key_down(VK_F4)) {
+        for (auto i : partners) {
+            if (i->behavior != nullptr) {
+                i->behavior->position() = player->behavior->position();
             }
         }
     }
 
     if (utility::was_key_down(VK_F6)) {
         player->behavior->as<sdk::Pl0000>()->changePlayer();
-        //nier_client_and_server::ChangePlayer change;
-        //sendPacket(change.data(), sizeof(change));
     }
 
     if (utility::was_key_down(VK_F7)) {
         for (auto& i : *entity_list) {
-            if (!i.ent || !i.handle)
+            if (!i.ent || !i.handle || !i.ent->behavior) {
                 continue;
+            }
 
-            if (!i.ent->behavior)
-                continue;
-
-            if (i.ent->behavior->as<sdk::BehaviorAppBase>()->health() == 0){
+            if (i.ent->behavior->as<sdk::BehaviorAppBase>()->health() == 0) {
                 continue;
             }
 
@@ -555,8 +585,6 @@ void AutomataMPMod::on_think() {
         }
     }
 
-    shared_think();
-
     if (utility::was_key_down(VK_F9)) {
         auto ent = entity_list->spawn_entity("partner", sdk::EModel::MODEL_2B, player->behavior->position());
 
@@ -567,36 +595,37 @@ void AutomataMPMod::on_think() {
             ent->behavior->as<sdk::Pl0000>()->buddy_handle() = player->handle;
             player->behavior->as<sdk::Pl0000>()->buddy_handle() = ent->handle;
 
-            // alternate way of assigning AI to the entity easily.
-            //changePlayer(player->entity);
-            //changePlayer(player->entity);
-
             ent->behavior->setSuspend(false);
 
             ent->behavior->obj_flags() = -1;
             ent->behavior->as<sdk::Pl0000>()->setBuddyFromNpc();
             ent->behavior->obj_flags() = 1;
-
-            //ent->entity->setPosRotResetHap(Vector4f{*player->entity->getPosition(), 1.0f}, glm::identity<glm::quat>());
         }
 
-        spdlog::info("{:x}", (uintptr_t)ent);
+        spdlog::info("[Debug] Spawned partner {:x}", (uintptr_t)ent);
     }
 
-    if (utility::was_key_down(VK_F10) && partner) {
+    if (utility::was_key_down(VK_F10)) {
         for (auto p : partners) {
             p->behavior->terminate();
         }
     }
 
-    /*if (utility::was_key_down(VK_F2)) {
-        Entity::Signal signal;
-        signal.signal = 0xEB1B2287;
-        player->entity->signal(signal);
-    }*/
-
     if (utility::was_key_down(VK_F3)) {
         player->behavior->setSuspend(!player->behavior->isSuspend());
+    }
+}
+
+// Logs only when the reason changes, the checks run every frame.
+void AutomataMPMod::log_world_state(const char* state) {
+    if (m_world_state == state) {
+        return;
+    }
+
+    m_world_state = state;
+
+    if (state != nullptr) {
+        spdlog::info("[Coop] {}", state);
     }
 }
 
@@ -615,16 +644,23 @@ void AutomataMPMod::shared_think() {
     auto player = entity_list->get_by_name("Player");
 
     if (!player) {
-        spdlog::info("Player not found");
+        log_world_state("Player not found");
         return;
     }
 
     auto controlled_entity = entity_list->get_possessed_entity();
 
     if (!controlled_entity || !controlled_entity->behavior) {
-        spdlog::info("Controlled entity invalid");
+        log_world_state("Controlled entity invalid");
+
+        if (m_client) {
+            m_client->recover_lost_character();
+        }
+
         return;
     }
+
+    log_world_state(nullptr);
 
     /*if (m_client && controlledEntity->name != string("partner")) {
         auto realBuddy = entityList->getByHandle(controlledEntity->entity->getBuddyHandle());
@@ -645,6 +681,12 @@ void AutomataMPMod::shared_think() {
         controlled_entity->behavior->obj_flags() = 0;
 
         auto real_buddy = entity_list->get_by_handle(controlled_entity->behavior->as<sdk::Pl0000>()->buddy_handle());
+
+        if (ScriptTracer::get().is_enabled()) {
+            const auto buddy = real_buddy != nullptr ? real_buddy->behavior : nullptr;
+            ScriptTracer::get().set_known_objects(controlled_entity->behavior, controlled_entity->behavior->model_index(),
+                buddy, buddy != nullptr ? buddy->model_index() : 0);
+        }
     }
 
     if (m_client) {

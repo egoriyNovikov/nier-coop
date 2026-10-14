@@ -21,6 +21,14 @@ struct AnimationStart {
     a4: uint;
 }
 
+// An enemy died in the sender's game. Each game has its own enemies, the receiver kills the one with
+// the same model that was first seen at the same place.
+struct EnemyDied {
+    model: uint;
+    spawn_position: nier.Vector3f;
+    position: nier.Vector3f;
+}
+
 table Buttons {
     buttons: [uint]; // 8 buttons
 }

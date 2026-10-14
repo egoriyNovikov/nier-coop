@@ -549,16 +549,19 @@ list(APPEND automatamp_SOURCES
 	"src/mods/BuddyFeatures.cpp"
 	"src/mods/Explorer.cpp"
 	"src/mods/multiplayer/CoopServer.cpp"
+	"src/mods/multiplayer/EnemyDeathSync.cpp"
 	"src/mods/multiplayer/EntitySync.cpp"
 	"src/mods/multiplayer/MidHooks.cpp"
 	"src/mods/multiplayer/NierClient.cpp"
 	"src/mods/multiplayer/Player.cpp"
 	"src/mods/multiplayer/PlayerHook.cpp"
+	"src/mods/multiplayer/ScriptTracer.cpp"
 	"src/AutomataMP.hpp"
 	"src/ExceptionHandler.hpp"
 	"src/LicenseStrings.hpp"
 	"src/Mod.hpp"
 	"src/Mods.hpp"
+	"src/Version.hpp"
 	"src/automata-imgui/automata_imconfig.hpp"
 	"src/automata-imgui/font_robotomedium.hpp"
 	"src/hooks/D3D11Hook.hpp"
@@ -570,11 +573,13 @@ list(APPEND automatamp_SOURCES
 	"src/mods/BuddyFeatures.hpp"
 	"src/mods/Explorer.hpp"
 	"src/mods/multiplayer/CoopServer.hpp"
+	"src/mods/multiplayer/EnemyDeathSync.hpp"
 	"src/mods/multiplayer/EntitySync.hpp"
 	"src/mods/multiplayer/MidHooks.hpp"
 	"src/mods/multiplayer/NierClient.hpp"
 	"src/mods/multiplayer/Player.hpp"
 	"src/mods/multiplayer/PlayerHook.hpp"
+	"src/mods/multiplayer/ScriptTracer.hpp"
 	"src/automata-imgui/imgui_impl_dx11.h"
 	"src/automata-imgui/imgui_impl_dx12.h"
 	"src/automata-imgui/imgui_impl_win32.h"
@@ -646,6 +651,14 @@ set_target_properties(automatamp PROPERTIES
 	ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO
 		"${CMAKE_BINARY_DIR}/lib/${CMKR_TARGET}"
 )
+
+# The git revision goes into the DLL (see src/Version.hpp), refreshed on every build.
+add_custom_target(automatamp_git_revision
+	COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT_FILE=${CMAKE_BINARY_DIR}/generated/GitRevision.hpp -P ${CMAKE_SOURCE_DIR}/cmake/GitRevision.cmake
+	BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/GitRevision.hpp
+)
+add_dependencies(automatamp automatamp_git_revision)
+target_include_directories(automatamp PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)

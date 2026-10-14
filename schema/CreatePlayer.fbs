@@ -4,6 +4,8 @@ struct DestroyPlayer {
     guid: ulong;
 }
 
+// Sent to everyone whenever the master client (the player leading the story) changes.
+// guid 0: nobody leads right now, e.g. the host disconnected.
 struct SetMasterClient {
     guid: ulong;
 }
@@ -15,6 +17,7 @@ table CreatePlayer {
     guid: ulong; // Every client must assign a slot for this player.
     name: string; // The player's name.
     model: uint; // The player's model.
+    isMasterClient: bool; // The player leads the story.
 }
 
 root_type CreatePlayer;

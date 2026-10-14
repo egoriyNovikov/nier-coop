@@ -1,4 +1,7 @@
 #include <thread>
+#include <algorithm>
+#include <cmath>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -7,6 +10,7 @@
 #include <sdk/Enums.hpp>
 
 #include "AutomataMP.hpp"
+#include "Version.hpp"
 
 #include "schema/Packets_generated.h"
 #include "mods/AutomataMPMod.hpp"
@@ -71,16 +75,17 @@ const char* get_buddy_routine(uint32_t model) {
 }
 }
 
-NierClient::NierClient(const std::string& host, const std::string& port, const std::string& name, const std::string& password)
+NierClient::NierClient(const std::string& host, const std::string& port, const std::string& name, const std::string& password, bool wants_host)
     : m_hello_name{ name },
-    m_password{ password }
+    m_password{ password },
+    m_wants_host{ wants_host }
 {
     std::scoped_lock _{m_mtx};
 
     enetpp::global_state::get().deinitialize();
     enetpp::global_state::get().initialize();
 
-    set_trace_handler([](const std::string& s) { spdlog::info("{}", s); });
+    set_trace_handler([](const std::string& s) { spdlog::debug("{}", s); });
     
     // Connecting is asynchronous: enetpp runs the connection on its own thread,
     // callers poll is_connecting()/is_connected().
@@ -138,8 +143,229 @@ void NierClient::on_world_unloaded() {
 
     m_next_bind_attempt.clear();
     m_need_entity_announce = true;
+
+    m_enemy_deaths.clear();
+    {
+        std::scoped_lock __{m_remote_deaths_mutex};
+        m_remote_deaths.clear();
+    }
+
+    {
+        // The puppets are gone, a new entity may get the same address.
+        std::scoped_lock __{m_puppet_input_mutex};
+        m_puppet_inputs.clear();
+    }
+
     m_swap_done = false;
     m_swap_pending = false;
+    m_swap_checked_handle = 0;
+    m_swap_from_handle = 0;
+    m_handed_back_handle = 0;
+    m_logged_player_flight_unit = 0;
+    m_logged_buddy_flight_unit = 0;
+    m_flight_unit_owner = 0;
+}
+
+bool NierClient::recover_lost_character() {
+    std::scoped_lock _{m_mtx};
+
+    // Fallback for hand_back_deleted_character: the character we took over is already gone, the game has
+    // no player. It never expects that: a little later the Pl0000 update reads the player without a null
+    // check and crashes (NieRAutomata.exe + 0x6ac8d1). The game's own switch can't be used here, it
+    // crashes without a current player too, so only the player handle is written.
+    if (m_swap_from_handle == 0) {
+        return false;
+    }
+
+    const auto handle = m_swap_from_handle;
+    m_swap_from_handle = 0; // One attempt per takeover, never every frame.
+
+    auto entity_list = sdk::EntityList::get();
+    auto original = entity_list != nullptr ? entity_list->get_by_handle(handle) : nullptr;
+
+    if (original == nullptr || original->behavior == nullptr || !original->behavior->is_pl0000()) {
+        spdlog::warn("[Coop] The character we played is gone and our own character is gone too, nothing to switch to");
+        return false;
+    }
+
+    spdlog::warn("[Coop] The character we played is gone, forcing the player back to our own character {:x}",
+        original->behavior->model_index());
+
+    m_no_swap_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    if (!sdk::EntityList::force_possessed_handle(handle)) {
+        spdlog::error("[Coop] Could not switch back to our own character");
+        return false;
+    }
+
+    // Take over the buddy again once the story brings it back.
+    m_swap_done = false;
+    m_swap_pending = false;
+    m_swap_checked_handle = 0;
+    return true;
+}
+
+void NierClient::hand_back_deleted_character(sdk::Entity* entity) {
+    // The story deletes the buddy we took over while it is the player character (9S in a prologue
+    // cutscene). Switch back to our own character while the buddy still exists.
+    if (entity == nullptr || entity->behavior == nullptr || !entity->behavior->is_pl0000()) {
+        return;
+    }
+
+    if (hand_back_character(entity, "the game deletes it")) {
+        // Not taken over again while the game finishes deleting it.
+        m_handed_back_handle = entity->handle;
+    }
+}
+
+bool NierClient::hand_back_character(sdk::Entity* played_entity, const char* reason) {
+    // Back to our own character with the game's own switch: changePlayer makes the current player's
+    // buddy (Pl0000 buddy_handle) the player.
+    if (m_swap_from_handle == 0 || played_entity == nullptr || played_entity->behavior == nullptr ||
+        !played_entity->behavior->is_pl0000()) {
+        return false;
+    }
+
+    auto entity_list = sdk::EntityList::get();
+
+    if (entity_list == nullptr || entity_list->get_possessed_entity() != played_entity) {
+        return false;
+    }
+
+    auto played = played_entity->behavior->as<sdk::Pl0000>();
+    auto original = entity_list->get_by_handle(m_swap_from_handle);
+
+    if (original == nullptr || original->behavior == nullptr || !original->behavior->is_pl0000()) {
+        spdlog::warn("[Coop] Giving back the character we play ({:x}, {}), but our own character is gone",
+            played->model_index(), reason);
+        return false;
+    }
+
+    // In the prologue 9S's buddy is not our 2B at this point (test 0.2.2), changePlayer would pick
+    // the wrong character or nobody. Point it at our own character first.
+    const auto old_buddy = played->buddy_handle();
+
+    spdlog::warn("[Coop] Giving back the character we play ({:x}, buddy {:x}, {}), switching to our own character {:x} ({:x})",
+        played->model_index(), old_buddy, reason, original->behavior->model_index(), original->handle);
+
+    played->buddy_handle() = original->handle;
+
+    // On the prologue bridge the story gives the player and the buddy a Flight Unit each. While we play
+    // 9S, 9S gets the player's one and our 2B the buddy's (AI) one. After the hand back the game mounts
+    // 2B on hers and it does not take the player's input (tests 0.2.4-0.2.6). Our own character takes
+    // the Flight Unit we were riding.
+    auto own = original->behavior->as<sdk::Pl0000>();
+    auto played_flight_unit = entity_list->get_by_handle(played->flight_unit_handle());
+
+    if (played_flight_unit != nullptr && played_flight_unit->behavior != nullptr &&
+        played_flight_unit->behavior->model_index() == sdk::EModel::MODEL_FLIGHT_UNIT &&
+        own->flight_unit_handle() != played->flight_unit_handle()) {
+        spdlog::info("[Coop] Swapping Flight Units: our character gets {:x} (was {:x})",
+            played->flight_unit_handle(), own->flight_unit_handle());
+        m_flight_unit_owner = original->handle;
+        m_previous_flight_unit = own->flight_unit_handle();
+        std::swap(played->flight_unit_handle(), own->flight_unit_handle());
+    }
+
+    // Our own character may be the puppet of the other player right now: give it back first, so the
+    // puppet state restored later does not overwrite what the hero switch sets on it.
+    {
+        std::scoped_lock _{m_players_mutex};
+
+        for (auto& [guid, player] : m_players) {
+            if (player != nullptr && guid != m_guid && player->get_handle() == original->handle) {
+                release_puppet(*player);
+            }
+        }
+    }
+
+    played->changePlayer();
+
+    m_no_swap_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+    const auto possessed = entity_list->get_possessed_entity();
+    spdlog::info("[Coop] After the switch we play {:x}", possessed != nullptr && possessed->behavior != nullptr
+        ? possessed->behavior->model_index() : 0);
+
+    m_swap_from_handle = 0;
+    m_swap_done = false;
+    m_swap_pending = false;
+    m_swap_checked_handle = 0;
+    return true;
+}
+
+void NierClient::on_story_script(const char* name, sdk::Behavior* self) {
+    std::scoped_lock _{m_mtx};
+
+    auto entity_list = sdk::EntityList::get();
+    auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+    const auto on_player = possessed != nullptr && possessed->behavior == self;
+
+    spdlog::info("[Script] {} on {:x} ({})", name, self != nullptr ? self->model_index() : 0,
+        on_player ? "player" : "not player");
+
+    const std::string_view script{name};
+
+    static constexpr std::string_view starts[] = {
+        "Pl0000.startPhaseEventFlightUnit", "Pl0000.startPhaseEventFlightUnitNoWep", "Pl0000.setBuddyFlightUnit",
+        "Pl0000.initEm1100FlightBattle", "Pl0000.initEm1100FinalFlightBattle", "Pl0000.initEm4000FlightBattle",
+    };
+    static constexpr std::string_view ends[] = {
+        "Pl0000.endPhaseEventFlightUnit", "Pl0000.clearGetOnFlightUnit",
+        "Pl0000.endEm1100FlightBattle", "Pl0000.endEm1100FinalFlightBattle", "Pl0000.endEm4000FlightBattle",
+    };
+
+    if (std::find(std::begin(ends), std::end(ends), script) != std::end(ends)) {
+        spdlog::info("[Coop] Flight Unit phase ended");
+        return;
+    }
+
+    if (std::find(std::begin(starts), std::end(starts), script) != std::end(starts)) {
+        spdlog::info("[Coop] Flight Unit phase started");
+    }
+}
+
+void NierClient::on_flight_unit_spawned(sdk::Entity* entity) {
+    spdlog::info("[Coop] Flight Unit spawned ({:x})", entity->handle);
+}
+
+void NierClient::log_flight_units(sdk::EntityList* entity_list) {
+    // The Flight Unit our character got on hand back is gone: give it back the one it had.
+    if (m_flight_unit_owner != 0) {
+        auto owner = entity_list->get_by_handle(m_flight_unit_owner);
+
+        if (owner == nullptr || owner->behavior == nullptr || !owner->behavior->is_pl0000()) {
+            m_flight_unit_owner = 0;
+        } else if (auto& handle = owner->behavior->as<sdk::Pl0000>()->flight_unit_handle();
+                   handle != 0 && entity_list->get_by_handle(handle) == nullptr) {
+            const auto previous = entity_list->get_by_handle(m_previous_flight_unit) != nullptr ? m_previous_flight_unit : 0;
+            spdlog::warn("[Coop] The Flight Unit we took over ({:x}) is gone, back to {:x}", handle, previous);
+            handle = previous;
+            m_flight_unit_owner = 0;
+        }
+    }
+
+    auto possessed = get_local_character(entity_list);
+
+    if (possessed == nullptr) {
+        return;
+    }
+
+    auto player = possessed->behavior->as<sdk::Pl0000>();
+    auto buddy = entity_list->get_by_handle(player->buddy_handle());
+
+    const auto player_flight_unit = player->flight_unit_handle();
+    const auto buddy_flight_unit = buddy != nullptr && buddy->behavior != nullptr && buddy->behavior->is_pl0000()
+        ? buddy->behavior->as<sdk::Pl0000>()->flight_unit_handle() : 0;
+
+    if (player_flight_unit != m_logged_player_flight_unit || buddy_flight_unit != m_logged_buddy_flight_unit) {
+        spdlog::info("[Coop] Flight Units: player {:x} has {:x}, buddy {:x} has {:x}", player->model_index(),
+            player_flight_unit, buddy != nullptr && buddy->behavior != nullptr ? buddy->behavior->model_index() : 0,
+            buddy_flight_unit);
+
+        m_logged_player_flight_unit = player_flight_unit;
+        m_logged_buddy_flight_unit = buddy_flight_unit;
+    }
 }
 
 void NierClient::think() {
@@ -151,6 +377,9 @@ void NierClient::think() {
     m_in_world = true;
 
     pump();
+
+    // Enemies are tracked from the start, to know where each one first appeared.
+    sync_enemy_deaths(is_connected() && m_welcome_received);
 
     if (!is_connected()) {
         return;
@@ -181,6 +410,21 @@ void NierClient::think() {
         }
 
         m_pending_destroy.clear();
+    }
+
+    // Story switches (Flight Unit, hacking, cutscenes) show up here, it helps to read the logs.
+    if (auto entity_list = sdk::EntityList::get(); entity_list != nullptr) {
+        const auto possessed = entity_list->get_possessed_entity();
+        const auto model = possessed != nullptr && possessed->behavior != nullptr ? possessed->behavior->model_index() : 0;
+
+        if (model != m_last_possessed_model) {
+            spdlog::info("[Coop] Now controlling {:x}", model);
+            m_last_possessed_model = model;
+        }
+    }
+
+    if (auto entity_list = sdk::EntityList::get(); entity_list != nullptr) {
+        log_flight_units(entity_list);
     }
 
     try_coop_swap();
@@ -219,6 +463,10 @@ void NierClient::think() {
             npc->character_controller().held_flags = data.held_button_flags();
             //*npc->getPosition() = *(Vector3f*)&data.position();
         }
+
+        smooth_puppet_positions();
+        update_puppet_inputs();
+        log_animation_stats();
 
         if (sync_enemies) {
             m_network_entities->think();
@@ -338,6 +586,11 @@ void NierClient::on_data_received(const enet_uint8* data, size_t size) {
 }
 
 void NierClient::on_packet_received(const nier::Packet* packet) {
+    if (packet->id() == nier::PacketType_ID_REJECT) {
+        handle_reject(packet);
+        return;
+    }
+
     if (!m_welcome_received && packet->id() != nier::PacketType_ID_WELCOME) {
         spdlog::error("Expected welcome packet, but got {} ({}), ignoring", packet->id(), nier::EnumNamePacketType(packet->id()));
         return;
@@ -370,7 +623,16 @@ void NierClient::on_packet_received(const nier::Packet* packet) {
         }
 
         case nier::PacketType_ID_SET_MASTER_CLIENT: {
-            m_is_master_client = true;
+            if (!handle_set_master_client(packet)) {
+                spdlog::error("Invalid set master client packet");
+            }
+
+            break;
+        }
+
+        // The server measures the round trip time.
+        case nier::PacketType_ID_PING: {
+            send_packet(nier::PacketType_ID_PONG);
             break;
         }
 
@@ -425,26 +687,33 @@ void NierClient::on_packet_received(const nier::Packet* packet) {
 }
 
 void NierClient::on_player_packet_received(nier::PacketType packet_type, const nier::PlayerPacket* packet) {
-    spdlog::info("Player packet {} received from {}", nier::EnumNamePacketType(packet_type), packet->guid());
+    spdlog::debug("Player packet {} received from {}", nier::EnumNamePacketType(packet_type), packet->guid());
 
     switch (packet_type) {
     case nier::PacketType_ID_PLAYER_DATA: {
         if (!handle_player_data(packet)) {
-            spdlog::error("Failed to handle player data");
+            spdlog::debug("Failed to handle player data");
         }
 
         break;
     }
     case nier::PacketType_ID_ANIMATION_START: {
         if (!handle_animation_start(packet)) {
-            spdlog::error("Failed to handle animation start");
+            spdlog::debug("Failed to handle animation start");
         }
 
         break;
     }
     case nier::PacketType_ID_BUTTONS: {
         if (!handle_buttons(packet)) {
-            spdlog::error("Failed to handle buttons");
+            spdlog::debug("Failed to handle buttons");
+        }
+
+        break;
+    }
+    case nier::PacketType_ID_ENEMY_DIED: {
+        if (!handle_enemy_died(packet)) {
+            spdlog::debug("Failed to handle enemy death");
         }
 
         break;
@@ -456,7 +725,7 @@ void NierClient::on_player_packet_received(nier::PacketType packet_type, const n
 }
 
 void NierClient::on_entity_packet_received(nier::PacketType packet_type, const nier::EntityPacket* packet) {
-    spdlog::info("Entity packet {} received from {}", nier::EnumNamePacketType(packet_type), packet->guid());
+    spdlog::debug("Entity packet {} received from {}", nier::EnumNamePacketType(packet_type), packet->guid());
 
     switch (packet_type) {
     case nier::PacketType_ID_SPAWN_ENTITY: {
@@ -475,14 +744,14 @@ void NierClient::on_entity_packet_received(nier::PacketType packet_type, const n
     }
     case nier::PacketType_ID_ENTITY_DATA: {
         if (!handle_entity_data(packet)) {
-            spdlog::error("Failed to handle entity data");
+            spdlog::debug("Failed to handle entity data");
         }
 
         break;
     }
     case nier::PacketType_ID_ENTITY_ANIMATION_START: {
         if (!handle_entity_animation_start(packet)) {
-            spdlog::error("Failed to handle entity animation start");
+            spdlog::debug("Failed to handle entity animation start");
         }
 
         break;
@@ -527,6 +796,7 @@ void NierClient::send_animation_start(uint32_t anim, uint32_t variant, uint32_t 
     auto dataoffs = builder.CreateStruct(data);
     builder.Finish(dataoffs);
 
+    ++m_stat_anims_sent;
     send_packet(nier::PacketType_ID_ANIMATION_START, builder.GetBufferPointer(), builder.GetSize());
 }
 
@@ -538,7 +808,65 @@ void NierClient::send_buttons(const uint32_t* buttons) {
     data_builder.add_buttons(dataoffs);
     builder.Finish(data_builder.Finish());
 
+    ++m_stat_buttons_sent;
     send_packet(nier::PacketType_ID_BUTTONS, builder.GetBufferPointer(), builder.GetSize());
+}
+
+void NierClient::send_enemy_died(const EnemyDeathSync::Death& death) {
+    nier::EnemyDied data{death.model, *(nier::Vector3f*)&death.spawn_position, *(nier::Vector3f*)&death.position};
+
+    flatbuffers::FlatBufferBuilder builder(0);
+    auto dataoffs = builder.CreateStruct(data);
+    builder.Finish(dataoffs);
+
+    send_packet(nier::PacketType_ID_ENEMY_DIED, builder.GetBufferPointer(), builder.GetSize());
+}
+
+void NierClient::sync_enemy_deaths(bool connected) {
+    // The old "enemies from the host" scheme deletes and recreates enemies itself.
+    if (!share_enemy_deaths || sync_enemies) {
+        return;
+    }
+
+    auto entity_list = sdk::EntityList::get();
+
+    if (entity_list == nullptr) {
+        return;
+    }
+
+    std::vector<EnemyDeathSync::Death> remote_deaths{};
+    {
+        std::scoped_lock _{m_remote_deaths_mutex};
+        remote_deaths.swap(m_remote_deaths);
+    }
+
+    for (const auto& death : remote_deaths) {
+        m_enemy_deaths.on_remote_death(entity_list, death);
+    }
+
+    std::vector<EnemyDeathSync::Death> deaths{};
+    m_enemy_deaths.think(entity_list, deaths);
+
+    // Not connected: nobody to tell, the deaths are only remembered as ours.
+    if (connected) {
+        for (const auto& death : deaths) {
+            send_enemy_died(death);
+        }
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now >= m_next_enemy_stats_log) {
+        m_next_enemy_stats_log = now + std::chrono::seconds(30);
+
+        const auto stats = m_enemy_deaths.take_stats();
+
+        if (stats.deaths_sent + stats.deaths_received > 0) {
+            spdlog::info("[Enemies] 30 s: new enemies {}, deaths sent {} received {}: killed here {}, already dead {}, "
+                         "not found {}",
+                stats.tracked, stats.deaths_sent, stats.deaths_received, stats.killed, stats.already_dead, stats.unmatched);
+        }
+    }
 }
 
 void NierClient::send_entity_packet(nier::PacketType id, uint32_t guid, const uint8_t* data, size_t size) {
@@ -555,7 +883,7 @@ void NierClient::send_entity_packet(nier::PacketType id, uint32_t guid, const ui
 
 void NierClient::send_entity_create(uint32_t guid, sdk::EntitySpawnParams* data) {
     if (!m_is_master_client) {
-        spdlog::info("Not master client, not sending entity create");
+        spdlog::debug("Not master client, not sending entity create");
         return;
     }
 
@@ -579,7 +907,7 @@ void NierClient::send_entity_create(uint32_t guid, sdk::EntitySpawnParams* data)
 
 void NierClient::send_entity_destroy(uint32_t guid) {
     if (!m_is_master_client) {
-        spdlog::info("Not master client, not sending entity destroy");
+        spdlog::debug("Not master client, not sending entity destroy");
         return;
     }
 
@@ -588,7 +916,7 @@ void NierClient::send_entity_destroy(uint32_t guid) {
 
 void NierClient::send_entity_data(uint32_t guid, sdk::BehaviorAppBase* entity) {
     if (!m_is_master_client) {
-        spdlog::info("Not master client, not sending entity data");
+        spdlog::debug("Not master client, not sending entity data");
         return;
     }
 
@@ -605,7 +933,7 @@ void NierClient::send_entity_data(uint32_t guid, sdk::BehaviorAppBase* entity) {
 
 void NierClient::send_entity_animation_start(uint32_t guid, uint32_t anim, uint32_t variant, uint32_t a3, uint32_t a4) {
     if (!m_is_master_client) {
-        spdlog::info("Not master client, not sending entity animation start");
+        spdlog::debug("Not master client, not sending entity animation start");
         return;
     }
     
@@ -631,6 +959,10 @@ void NierClient::on_entity_created(sdk::Entity* entity, sdk::EntitySpawnParams* 
 }
 
 void NierClient::on_entity_deleted(sdk::Entity* entity) {
+    std::scoped_lock _{m_mtx};
+
+    hand_back_deleted_character(entity);
+
     if (m_network_entities == nullptr) {
         return;
     }
@@ -658,11 +990,13 @@ void NierClient::send_hello() {
         model = player->behavior->model_index();
     }
 
-    spdlog::info("[Coop] Hello: controlling model {:x}, announcing model {:x}", possessed->behavior->model_index(), model);
+    spdlog::info("[Coop] Hello: controlling model {:x}, announcing model {:x}, host role {}, mod {}",
+        possessed->behavior->model_index(), model, m_wants_host, AUTOMATAMP_FULL_VERSION);
 
     flatbuffers::FlatBufferBuilder builder{};
     const auto name_pkt = builder.CreateString(m_hello_name);
     const auto pwd_pkt = builder.CreateString(m_password);
+    const auto version_pkt = builder.CreateString(AUTOMATAMP_FULL_VERSION);
 
     nier::HelloBuilder hello_builder(builder);
     hello_builder.add_major(nier::VersionMajor_Value);
@@ -671,6 +1005,8 @@ void NierClient::send_hello() {
     hello_builder.add_name(name_pkt);
     hello_builder.add_password(pwd_pkt);
     hello_builder.add_model(model);
+    hello_builder.add_wants_host(m_wants_host);
+    hello_builder.add_mod_version(version_pkt);
 
     builder.Finish(hello_builder.Finish());
 
@@ -748,9 +1084,11 @@ bool NierClient::handle_welcome(const nier::Packet* packet) {
 
     m_is_master_client = welcome->isMasterClient();
     m_guid = welcome->guid();
+    m_session_id = welcome->sessionId();
     const auto highest_guid = welcome->highestEntityGuid();
 
-    spdlog::info("Welcome packet received, isMasterClient: {}, guid: {}", m_is_master_client, m_guid);
+    spdlog::info("[Coop] Joined session {}: guid {}, {}", m_session_id, m_guid,
+        m_is_master_client ? "we lead the story" : "the host leads the story");
 
     m_network_entities = std::make_unique<EntitySync>(highest_guid);
 
@@ -781,8 +1119,10 @@ bool NierClient::handle_create_player(const nier::Packet* packet) {
     new_player->set_guid(create_player->guid());
     new_player->set_name(create_player->name()->c_str());
     new_player->set_model(create_player->model());
+    new_player->set_master_client(create_player->isMasterClient());
 
-    spdlog::info(" Player {} ({}), model {:x}", create_player->guid(), create_player->name()->c_str(), create_player->model());
+    spdlog::info("[Coop] Player {} ({}), model {:x}{}", create_player->guid(), create_player->name()->c_str(), create_player->model(),
+        create_player->isMasterClient() ? ", leads the story" : "");
 
     m_players[create_player->guid()] = std::move(new_player);
 
@@ -803,6 +1143,11 @@ bool NierClient::handle_destroy_player(const nier::Packet* packet) {
         return true;
     }
 
+    if (it->second != nullptr) {
+        spdlog::info("[Coop] {} left the session{}", it->second->get_name(),
+            it->second->is_master_client() ? ", nobody leads the story until the host is back" : "");
+    }
+
     // Releasing touches game entities, so it's done in think().
     if (it->second != nullptr && it->second->get_handle() != 0) {
         m_pending_destroy.push_back(std::move(it->second));
@@ -814,26 +1159,97 @@ bool NierClient::handle_destroy_player(const nier::Packet* packet) {
     return true;
 }
 
-Player* NierClient::get_host_player() {
-    // The server makes the first player to join the master client, and guids only grow,
-    // so the remote player with the lowest guid is the host.
-    Player* host = nullptr;
+bool NierClient::handle_set_master_client(const nier::Packet* packet) {
+    if (packet->data() == nullptr || packet->data()->size() < sizeof(nier::SetMasterClient)) {
+        return false;
+    }
 
-    for (auto& [guid, player] : m_players) {
-        if (player == nullptr || guid == m_guid) {
-            continue;
-        }
+    const auto master = flatbuffers::GetRoot<nier::SetMasterClient>(packet->data()->data());
+    const auto guid = master->guid();
 
-        if (host == nullptr || guid < host->get_guid()) {
-            host = player.get();
+    std::scoped_lock _{m_players_mutex};
+
+    m_is_master_client = guid != 0 && guid == m_guid;
+
+    std::string leader = m_is_master_client ? "we" : "nobody, waiting for the host";
+
+    for (auto& [player_guid, player] : m_players) {
+        if (player != nullptr) {
+            player->set_master_client(player_guid == guid);
+
+            if (player_guid == guid && player_guid != m_guid) {
+                leader = player->get_name();
+            }
         }
     }
 
-    return host;
+    spdlog::info("[Coop] Story leader changed: {}", leader);
+
+    // Decide again which character we play, the leader may play a different one.
+    m_swap_done = false;
+
+    return true;
+}
+
+bool NierClient::handle_reject(const nier::Packet* packet) {
+    static const std::unordered_map<nier::RejectReason, const char*> reasons{
+        {nier::RejectReason_WrongPassword, "Wrong password"},
+        {nier::RejectReason_VersionMismatch, "The server runs a different mod version, update the mod or the server"},
+        {nier::RejectReason_InvalidModel, "The server does not accept your character"},
+        {nier::RejectReason_ServerFull, "The server is full (2 players)"},
+        {nier::RejectReason_HostTaken, "Someone else is already the host, join without the host role"},
+    };
+
+    m_reject_reason = "Rejected by the server";
+
+    if (packet->data() != nullptr) {
+        const auto reject = flatbuffers::GetRoot<nier::Reject>(packet->data()->data());
+        auto verif = flatbuffers::Verifier(packet->data()->data(), packet->data()->size());
+
+        if (reject->Verify(verif)) {
+            if (auto it = reasons.find(reject->reason()); it != reasons.end()) {
+                m_reject_reason = it->second;
+            }
+
+            if (reject->detail() != nullptr && reject->detail()->size() > 0) {
+                m_reject_reason += std::string{" ("} + reject->detail()->c_str() + ")";
+            }
+        }
+    }
+
+    spdlog::error("[Coop] {}", m_reject_reason);
+    return true;
+}
+
+Player* NierClient::get_host_player() {
+    // The server tells who leads the story, see handle_set_master_client.
+    for (auto& [guid, player] : m_players) {
+        if (player != nullptr && guid != m_guid && player->is_master_client()) {
+            return player.get();
+        }
+    }
+
+    return nullptr;
+}
+
+std::string NierClient::get_leader_name() {
+    std::scoped_lock _{m_players_mutex};
+
+    const auto host = get_host_player();
+    return host != nullptr ? host->get_name() : std::string{};
+}
+
+bool NierClient::is_waiting_for_host() {
+    if (m_is_master_client) {
+        return false;
+    }
+
+    std::scoped_lock _{m_players_mutex};
+    return get_host_player() == nullptr;
 }
 
 void NierClient::try_coop_swap() {
-    if (m_is_master_client || m_swap_done || !auto_swap_character) {
+    if (m_is_master_client || !auto_swap_character || m_swap_pending) {
         return;
     }
 
@@ -848,31 +1264,79 @@ void NierClient::try_coop_swap() {
     auto entity_list = sdk::EntityList::get();
     auto possessed = get_local_character(entity_list);
 
-    // Wait until we control a character, the swap is decided once per world load.
     if (possessed == nullptr) {
         return;
     }
 
-    m_swap_done = true;
+    // Decided again whenever the game hands us another character (story switch, after a cutscene).
+    if (possessed->handle != m_swap_checked_handle) {
+        m_swap_checked_handle = possessed->handle;
+        m_swap_done = false;
+        m_swap_wait_logged = false;
+    }
+
+    if (m_swap_done) {
+        return;
+    }
 
     auto local = possessed->behavior->as<sdk::Pl0000>();
 
     if (local->model_index() != host->get_model()) {
-        spdlog::info("[Coop] Already playing a different character than the host, no swap needed");
+        spdlog::info("[Coop] Playing {:x}, the host plays {:x}: no swap needed", local->model_index(), host->get_model());
+        m_swap_done = true;
         return;
     }
 
     auto buddy = entity_list->get_by_handle(local->buddy_handle());
 
-    if (buddy == nullptr || buddy == possessed || buddy->behavior == nullptr || !buddy->behavior->is_pl0000() ||
-        !is_character_model(buddy->behavior->model_index()) || buddy->behavior->model_index() == local->model_index()) {
-        spdlog::info("[Coop] Same character as the host but no story buddy to take over, staying on the current character");
+    // Right after a hand back the buddy is the character the game is deleting: leave it alone.
+    if (std::chrono::steady_clock::now() < m_no_swap_until || (buddy != nullptr && buddy->handle == m_handed_back_handle)) {
         return;
+    }
+
+    // Checked every think: the buddy often joins the scene later without a loading screen
+    // (9S in the prologue), the swap happens as soon as the game puts it in the scene.
+    if (buddy == nullptr || buddy == possessed || buddy->behavior == nullptr || !buddy->behavior->is_pl0000() ||
+        !is_character_model(buddy->behavior->model_index()) || buddy->behavior->model_index() == local->model_index() ||
+        buddy->behavior->isSuspend() != 0) {
+        if (!m_swap_wait_logged) {
+            spdlog::info("[Coop] Same character as the host, waiting for the story buddy to take over");
+            m_swap_wait_logged = true;
+        }
+
+        return;
+    }
+
+    // A buddy with its own Flight Unit belongs to the game (concept 5.5). On the prologue bridge 9S comes
+    // in on his, and if we play him the story later mounts our 2B on an AI Flight Unit that does not take
+    // input (1.7.2). Played as 2B, the scene goes like in single player (test 0.2.3).
+    if (const auto flight_unit_handle = buddy->behavior->as<sdk::Pl0000>()->flight_unit_handle(); flight_unit_handle != 0) {
+        auto flight_unit = entity_list->get_by_handle(flight_unit_handle);
+
+        if (flight_unit != nullptr && flight_unit->behavior != nullptr &&
+            flight_unit->behavior->model_index() == sdk::EModel::MODEL_FLIGHT_UNIT) {
+            if (m_flight_unit_skip_logged != flight_unit_handle) {
+                spdlog::info("[Coop] Story buddy {:x} has a Flight Unit ({:x}), leaving it to the game",
+                    buddy->behavior->model_index(), flight_unit_handle);
+                m_flight_unit_skip_logged = flight_unit_handle;
+            }
+
+            return;
+        }
+    }
+
+    // The buddy may already be the host's puppet, it becomes ours instead.
+    for (auto& [guid, player] : m_players) {
+        if (player != nullptr && guid != m_guid && player->get_handle() == buddy->handle) {
+            release_puppet(*player);
+            m_next_bind_attempt[guid] = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        }
     }
 
     spdlog::info("[Coop] Taking control of the story buddy {:x}", buddy->behavior->model_index());
 
     // The game's own player <-> buddy switch.
+    m_swap_done = true;
     m_swap_from_handle = possessed->handle;
     m_swap_wait_thinks = 0;
     m_swap_pending = true;
@@ -889,8 +1353,13 @@ void NierClient::sync_puppets() {
         auto entity_list = sdk::EntityList::get();
         auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
 
-        if ((possessed != nullptr && possessed->handle != m_swap_from_handle) || ++m_swap_wait_thinks > 120) {
+        if (possessed != nullptr && possessed->handle != m_swap_from_handle) {
             m_swap_pending = false;
+        } else if (++m_swap_wait_thinks > 120) {
+            // The game ignored the switch (cutscene, scripted moment): try again later.
+            spdlog::warn("[Coop] The game did not switch us to the story buddy, retrying");
+            m_swap_pending = false;
+            m_swap_done = false;
         } else {
             return;
         }
@@ -1070,6 +1539,15 @@ void NierClient::release_puppet(Player& player) {
         return;
     }
 
+    {
+        std::scoped_lock _{m_puppet_input_mutex};
+
+        if (auto it = m_puppet_inputs.find(npc); it != m_puppet_inputs.end()) {
+            restore_puppet(npc, it->second);
+            m_puppet_inputs.erase(it);
+        }
+    }
+
     // Give the story buddy back to the game.
     spdlog::info("[Coop] Returning the story buddy of {} to the AI", player.get_name());
 
@@ -1161,7 +1639,7 @@ bool NierClient::handle_create_entity(const nier::EntityPacket* packet) {
 }
 
 bool NierClient::handle_destroy_entity(const nier::EntityPacket* packet) {
-    spdlog::info("Destroy entity packet received");
+    spdlog::debug("Destroy entity packet received");
 
     m_network_entities->remove_entity(packet->guid());
 
@@ -1169,7 +1647,7 @@ bool NierClient::handle_destroy_entity(const nier::EntityPacket* packet) {
 }
 
 bool NierClient::handle_entity_data(const nier::EntityPacket* packet) {
-    spdlog::info("Entity data packet received");
+    spdlog::debug("Entity data packet received");
 
     const auto entity_data = flatbuffers::GetRoot<nier::EntityData>(packet->data()->data());
     m_network_entities->process_entity_data(packet->guid(), entity_data);
@@ -1178,13 +1656,13 @@ bool NierClient::handle_entity_data(const nier::EntityPacket* packet) {
 }
 
 bool NierClient::handle_entity_animation_start(const nier::EntityPacket* packet) {
-    spdlog::info("Entity animation start packet received");
+    spdlog::debug("Entity animation start packet received");
 
     const auto guid = packet->guid();
     auto entity_networked = m_network_entities->get_network_entity_from_guid(guid);
 
     if (entity_networked == nullptr) {
-        spdlog::error(" (nullptr) Entity data packet received for unknown entity {}", guid);
+        spdlog::debug(" (nullptr) Entity data packet received for unknown entity {}", guid);
         return false;
     }
 
@@ -1219,14 +1697,14 @@ bool NierClient::handle_player_data(const nier::PlayerPacket* packet) {
     }
 
     if (!m_players.contains(guid)) {
-        spdlog::error("Player data packet received for unknown player {}", guid);
+        spdlog::debug("Player data packet received for unknown player {}", guid);
         return false;
     }
 
     const auto& player_networked = m_players[guid];
 
     if (player_networked == nullptr) {
-        spdlog::error("(nullptr) Player data packet received for unknown player {}", guid);
+        spdlog::debug("(nullptr) Player data packet received for unknown player {}", guid);
         return false;
     }
 
@@ -1234,7 +1712,9 @@ bool NierClient::handle_player_data(const nier::PlayerPacket* packet) {
     // Outside the game thread we only keep the data, the next think() applies it.
     auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
 
-    if (npc != nullptr) {
+    // With smoothing, think() moves the puppet towards this position over the next frames. Snapping
+    // here fought the puppet's own run animation: it ran ahead, got pulled back on every packet.
+    if (npc != nullptr && !smooth_puppet_position) {
         npc->position() = *(Vector3f*)&player_data->position();
     }
 
@@ -1252,20 +1732,22 @@ bool NierClient::handle_animation_start(const nier::PlayerPacket* packet) {
     }
 
     if (!m_players.contains(guid)) {
-        spdlog::error("Player data packet received for unknown player {}", guid);
+        spdlog::debug("Player data packet received for unknown player {}", guid);
         return false;
     }
 
     const auto& player_networked = m_players[guid];
 
     if (player_networked == nullptr) {
-        spdlog::error("(nullptr) Player data packet received for unknown player {}", guid);
+        spdlog::debug("(nullptr) Player data packet received for unknown player {}", guid);
         return false;
     }
 
     auto animation_data = flatbuffers::GetRoot<nier::AnimationStart>(packet->data()->data());
     // Outside the game thread we only keep the data, the next think() applies it.
     auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
+
+    ++m_stat_anims_received;
 
     if (npc != nullptr) {
         switch (animation_data->anim()) {
@@ -1277,6 +1759,7 @@ bool NierClient::handle_animation_start(const nier::PlayerPacket* packet) {
             return true;
         default:
             if (npc) {
+                ++m_stat_anims_applied;
                 npc->start_animation(animation_data->anim(), animation_data->variant(), animation_data->a3(), animation_data->a4());
             } else {
                 spdlog::error("Cannot start animation, npc is null");
@@ -1296,14 +1779,14 @@ bool NierClient::handle_buttons(const nier::PlayerPacket* packet) {
     }
 
     if (!m_players.contains(guid)) {
-        spdlog::error("Player data packet received for unknown player {}", guid);
+        spdlog::debug("Player data packet received for unknown player {}", guid);
         return false;
     }
 
     const auto& player_networked = m_players[guid];
 
     if (player_networked == nullptr) {
-        spdlog::error("(nullptr) Player data packet received for unknown player {}", guid);
+        spdlog::debug("(nullptr) Player data packet received for unknown player {}", guid);
         return false;
     }
 
@@ -1311,8 +1794,32 @@ bool NierClient::handle_buttons(const nier::PlayerPacket* packet) {
     // Outside the game thread we only keep the data, the next think() applies it.
     auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
 
-    if (npc != nullptr) {
+    ++m_stat_buttons_received;
+
+    if (npc != nullptr && buttons->buttons() != nullptr && buttons->buttons()->size() >= sdk::Pl0000::EButtonIndex::INDEX_MAX) {
         const auto buttons_data = buttons->buttons()->data();
+
+        // Normal path: MidHooks::on_processed_buttons applies one frame per game update of the puppet.
+        {
+            std::scoped_lock _{m_puppet_input_mutex};
+
+            if (auto it = m_puppet_inputs.find(npc); it != m_puppet_inputs.end() && it->second.driven_by_hook) {
+                auto& queue = it->second.buttons;
+                ButtonFrame frame{};
+                std::copy_n(buttons_data, frame.size(), frame.begin());
+                queue.push_back(frame);
+
+                // Lag spike: don't replay a long backlog, the remote player is already past it.
+                while (queue.size() > 12) {
+                    queue.pop_front();
+                    ++m_stat_button_frames_dropped;
+                }
+
+                return true;
+            }
+        }
+
+        // The hook hasn't reached this puppet yet: write the buttons right away, as before.
         const auto size_buttons = sizeof(regenny::CharacterController::buttons);
         memcpy(&npc->character_controller().buttons, buttons_data, size_buttons);
 
@@ -1326,4 +1833,284 @@ bool NierClient::handle_buttons(const nier::PlayerPacket* packet) {
     }
 
     return true;
+}
+
+bool NierClient::handle_enemy_died(const nier::PlayerPacket* packet) {
+    if (packet->guid() == m_guid || packet->data() == nullptr || packet->data()->size() < sizeof(nier::EnemyDied)) {
+        return false;
+    }
+
+    auto data = flatbuffers::GetRoot<nier::EnemyDied>(packet->data()->data());
+
+    EnemyDeathSync::Death death{};
+    death.model = data->model();
+    death.spawn_position = *(Vector3f*)&data->spawn_position();
+    death.position = *(Vector3f*)&data->position();
+
+    std::scoped_lock _{m_remote_deaths_mutex};
+    m_remote_deaths.push_back(death);
+
+    return true;
+}
+
+void NierClient::update_puppet_inputs() {
+    std::scoped_lock _{m_puppet_input_mutex};
+
+    auto entity_list = sdk::EntityList::get();
+
+    // Drop the puppets that are no longer bound, keep the queued buttons of the others.
+    for (auto it = m_puppet_inputs.begin(); it != m_puppet_inputs.end();) {
+        auto player = m_players.find(it->second.guid);
+
+        if (player == m_players.end() || player->second == nullptr || player->second->get_entity() != it->first) {
+            // Still alive (the player left, or the puppet changed): hand it back as it was.
+            auto entity = entity_list != nullptr ? entity_list->get_by_handle(it->second.handle) : nullptr;
+
+            if (entity != nullptr && entity->behavior == it->first) {
+                restore_puppet(it->first, it->second);
+            }
+
+            it = m_puppet_inputs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto& [guid, player] : m_players) {
+        if (player == nullptr || guid == m_guid) {
+            continue;
+        }
+
+        auto npc = player->get_entity();
+
+        if (npc == nullptr) {
+            continue;
+        }
+
+        auto& input = m_puppet_inputs[npc];
+        input.guid = guid;
+        input.handle = player->get_handle();
+        input.data = player->get_player_data();
+
+        if (puppet_as_player) {
+            make_puppet_player_controlled(npc, input);
+        } else if (input.made_player) {
+            restore_puppet(npc, input);
+        }
+    }
+}
+
+void NierClient::smooth_puppet_positions() {
+    const auto now = std::chrono::steady_clock::now();
+    auto dt = std::chrono::duration<float>(now - m_last_smooth_time).count();
+    m_last_smooth_time = now;
+
+    // First frame, or back from a pause/loading screen.
+    if (dt <= 0.0f || dt > 0.25f) {
+        dt = 1.0f / 60.0f;
+    }
+
+    if (!smooth_puppet_position) {
+        return;
+    }
+
+    // Farther than this the puppet is somewhere else entirely (teleport, cutscene, respawn): snap.
+    constexpr float snap_distance = 5.0f;
+    // Below this the puppet's own movement is close enough, leave it alone.
+    constexpr float dead_zone = 0.02f;
+    // How fast the remaining error goes away: about 15% of it per frame at 60 fps, gone in ~0.25 s.
+    constexpr float correction_rate = 10.0f;
+
+    const auto blend = 1.0f - std::exp(-correction_rate * dt);
+
+    for (auto& [guid, player] : m_players) {
+        if (player == nullptr || guid == m_guid || !player->has_player_data()) {
+            continue;
+        }
+
+        auto npc = player->get_entity();
+
+        if (npc == nullptr) {
+            continue;
+        }
+
+        // The puppet runs on its own from the network speed and facing (puppet_as_player), this only
+        // removes the drift between that and the remote player. The target lags by the network latency,
+        // so the puppet trails the remote player by that much instead of jumping back and forth.
+        const auto target = *(Vector3f*)&player->get_player_data().position();
+        auto& position = npc->position();
+        const auto error = target - position;
+        const auto distance = glm::length(error);
+
+        m_stat_position_error_sum += distance;
+        m_stat_position_error_max = std::max(m_stat_position_error_max, distance);
+        ++m_stat_position_samples;
+
+        if (distance > snap_distance) {
+            position = target;
+            ++m_stat_position_snaps;
+        } else if (distance > dead_zone) {
+            position += error * blend;
+        }
+    }
+}
+
+void NierClient::make_puppet_player_controlled(sdk::Pl0000* npc, PuppetInput& input) {
+    auto sources = npc->controller_input_sources();
+
+    if (!input.made_player) {
+        input.saved_player_controlled = npc->is_player_controlled();
+        input.saved_control_flags = npc->control_flags();
+        std::copy_n(sources, input.saved_input_sources.size(), input.saved_input_sources.begin());
+        input.made_player = true;
+
+        spdlog::info("[Anim] Puppet {:x}: player controlled {} -> 1, control flags {:x} -> {:x}, input sources {} {} {} -> off",
+            (uintptr_t)npc, input.saved_player_controlled, input.saved_control_flags, input.saved_control_flags & ~0xdu,
+            sources[0], sources[1], sources[2]);
+    }
+
+    // Same as the game's hero switch does for the new hero, so the controller update runs for the puppet.
+    // Every input source stays off: the puppet must not read our gamepad, the network input is written
+    // over the result in apply_puppet_input/apply_puppet_movement. Enforced every frame, the game or the
+    // story may set them back.
+    npc->is_player_controlled() = 1;
+    npc->control_flags() &= ~0xdu;
+    sources[0] = 0;
+    sources[1] = 0;
+    sources[2] = 0;
+}
+
+void NierClient::restore_puppet(sdk::Pl0000* npc, PuppetInput& input) {
+    if (!input.made_player) {
+        return;
+    }
+
+    input.made_player = false;
+
+    // The game made it the player's character in the meantime: its flags are the game's now.
+    auto entity_list = sdk::EntityList::get();
+    auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (possessed != nullptr && possessed->behavior == npc) {
+        spdlog::info("[Anim] Puppet {:x} is our character now, not restoring its flags", (uintptr_t)npc);
+        return;
+    }
+
+    spdlog::info("[Anim] Puppet {:x}: restoring player controlled {}, control flags {:x}", (uintptr_t)npc,
+        input.saved_player_controlled, input.saved_control_flags);
+
+    npc->is_player_controlled() = input.saved_player_controlled;
+    npc->control_flags() = input.saved_control_flags;
+    std::copy(input.saved_input_sources.begin(), input.saved_input_sources.end(), npc->controller_input_sources());
+}
+
+bool NierClient::apply_puppet_movement(sdk::Pl0000* entity) {
+    std::scoped_lock _{m_puppet_input_mutex};
+
+    auto it = m_puppet_inputs.find(entity);
+
+    if (it == m_puppet_inputs.end()) {
+        return false;
+    }
+
+    auto& input = it->second;
+
+    if (!input.movement_logged) {
+        input.movement_logged = true;
+        spdlog::info("[Anim] Puppet {:x} now takes its movement from the game's stick update", (uintptr_t)entity);
+    }
+
+    // The game turns speed (stick magnitude) and facing into walk/run animations, as for the local player.
+    const auto speed = input.data.speed();
+    entity->speed() = speed;
+    entity->speed_squared() = speed * speed;
+    entity->facing2() = input.data.facing2();
+
+    return true;
+}
+
+bool NierClient::apply_puppet_input(sdk::Pl0000* entity) {
+    std::scoped_lock _{m_puppet_input_mutex};
+
+    auto it = m_puppet_inputs.find(entity);
+
+    if (it == m_puppet_inputs.end()) {
+        return false;
+    }
+
+    auto& input = it->second;
+    auto& controller = entity->character_controller();
+
+    if (!input.driven_by_hook) {
+        input.driven_by_hook = true;
+        spdlog::info("[Anim] Puppet {:x} now takes its input from the game's button update", (uintptr_t)entity);
+    }
+
+    ++m_stat_hook_frames;
+
+    // Movement: the game turns speed and facing into walk/run animations, as for the local player.
+    controller.speed = input.data.speed();
+    controller.facing = input.data.facing2();
+    controller.held_flags = input.data.held_button_flags();
+
+    // One remote frame of buttons per update, nothing pressed when the queue is empty: a press is
+    // applied exactly once (attack, jump, dodge), a held button stays in held_flags.
+    ButtonFrame frame{};
+
+    if (!input.buttons.empty()) {
+        frame = input.buttons.front();
+        input.buttons.pop_front();
+        ++m_stat_button_frames_applied;
+    }
+
+    for (size_t i = 0; i < frame.size(); ++i) {
+        controller.buttons[i] = frame[i];
+
+        if (frame[i] != 0) {
+            controller.held_flags |= 1u << i;
+        }
+    }
+
+    return true;
+}
+
+void NierClient::log_animation_stats() {
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now < m_next_stats_log) {
+        return;
+    }
+
+    m_next_stats_log = now + std::chrono::seconds(10);
+
+    const auto anims_sent = m_stat_anims_sent.exchange(0);
+    const auto anims_received = m_stat_anims_received.exchange(0);
+    const auto anims_applied = m_stat_anims_applied.exchange(0);
+    const auto buttons_sent = m_stat_buttons_sent.exchange(0);
+    const auto buttons_received = m_stat_buttons_received.exchange(0);
+    const auto frames_applied = m_stat_button_frames_applied.exchange(0);
+    const auto frames_dropped = m_stat_button_frames_dropped.exchange(0);
+    const auto hook_frames = m_stat_hook_frames.exchange(0);
+
+    const auto position_samples = std::exchange(m_stat_position_samples, 0);
+    const auto position_error_sum = std::exchange(m_stat_position_error_sum, 0.0f);
+    const auto position_error_max = std::exchange(m_stat_position_error_max, 0.0f);
+    const auto position_snaps = std::exchange(m_stat_position_snaps, 0);
+
+    if (anims_sent + anims_received + buttons_sent + buttons_received + hook_frames + position_samples == 0) {
+        return;
+    }
+
+    size_t puppets = 0;
+    {
+        std::scoped_lock _{m_puppet_input_mutex};
+        puppets = m_puppet_inputs.size();
+    }
+
+    spdlog::info("[Anim] 10 s: sent anims {} buttons {}; received anims {} (applied {}) buttons {}; "
+                 "puppets {}, puppet updates {}, button frames applied {} dropped {}; "
+                 "position error avg {:.2f} m max {:.2f} m, snaps {}",
+        anims_sent, buttons_sent, anims_received, anims_applied, buttons_received, puppets, hook_frames, frames_applied,
+        frames_dropped, position_samples > 0 ? position_error_sum / position_samples : 0.0f, position_error_max,
+        position_snaps);
 }

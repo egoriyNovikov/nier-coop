@@ -1,4 +1,6 @@
+#include <array>
 #include <string>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -7,6 +9,8 @@
 
 #include <sdk/Entity.hpp>
 #include <sdk/EntityList.hpp>
+#include <sdk/Enums.hpp>
+#include <sdk/ScriptFunctions.hpp>
 
 #include <utility/Scan.hpp>
 #include <utility/Module.hpp>
@@ -18,10 +22,42 @@
 #include "AutomataMP.hpp"
 
 #include "MidHooks.hpp"
+#include "ScriptTracer.hpp"
 
 using namespace std;
 
 MidHooks* g_mid_hooks = nullptr;
+
+namespace {
+// Story script functions on Pl0000 that move characters between player, buddy and Flight Unit.
+// Logged to see what the story does; the client also gives the story buddy back before a Flight Unit
+// phase starts (see NierClient::on_story_script).
+constexpr std::array k_traced_scripts{
+    "Pl0000.changePlayer",
+    "Pl0000.changePlayerFinal",
+    "Pl0000.changePlayerFinalA2",
+    "Pl0000.setPlayerFromNPC",
+    "Pl0000.setBuddyFromNpc",
+    "Pl0000.setNpcFromBuddy",
+    "Pl0000.destroyBuddy",
+    "Pl0000.startPhaseEventFlightUnit",
+    "Pl0000.startPhaseEventFlightUnitNoWep",
+    "Pl0000.endPhaseEventFlightUnit",
+    "Pl0000.setBuddyFlightUnit",
+    "Pl0000.clearGetOnFlightUnit",
+    "Pl0000.initEm1100FlightBattle",
+    "Pl0000.endEm1100FlightBattle",
+    "Pl0000.initEm1100FinalFlightBattle",
+    "Pl0000.endEm1100FinalFlightBattle",
+    "Pl0000.initEm4000FlightBattle",
+    "Pl0000.endEm4000FlightBattle",
+};
+
+template <size_t I>
+void on_traced_script(safetyhook::Context& context) {
+    AutomataMPMod::get()->on_story_script(k_traced_scripts[I], (sdk::Behavior*)context.rcx);
+}
+}
 
 uintptr_t get_on_update_function() {
     static uintptr_t on_update_function = []() -> uintptr_t {
@@ -105,6 +141,30 @@ uintptr_t get_on_set_held_flags() {
     return pre_process_buttons;
 }
 
+// In the controller update (base + 0x500ee0), right after the stick update (base + 0x52ac90) that
+// recomputes speed and facing. RBX is the character controller.
+uintptr_t get_on_processed_stick() {
+    static uintptr_t on_processed_stick = []() -> uintptr_t {
+        spdlog::info("[MidHooks] Finding on_processed_stick...");
+
+        // mov rcx, rbx; call ProcessButtons; mov rdx, rsi; mov rcx, rbx; call stick update; cmp [rip+x], 5
+        const auto call_site = utility::scan(utility::get_executable(), "48 8B CB E8 ? ? ? ? 48 8B D6 48 8B CB E8 ? ? ? ? 83 3D ? ? ? ? 05");
+
+        if (!call_site) {
+            spdlog::error("[MidHooks] Failed to find on_processed_stick.");
+            return 0;
+        }
+
+        const auto result = *call_site + 19;
+
+        spdlog::info("[MidHooks] on_processed_stick: {:x}", result);
+
+        return result;
+    }();
+
+    return on_processed_stick;
+}
+
 uintptr_t get_entity_terminate_fn() {
     static uintptr_t entity_terminate_fn = []() -> uintptr_t {
         spdlog::info("[MidHooks] Finding entity_terminate_fn...");
@@ -172,6 +232,10 @@ MidHooks::MidHooks() {
     add_hook(get_on_update_function(), &MidHooks::on_update);
     add_hook(get_on_processed_buttons(), &MidHooks::on_processed_buttons);
 
+    if (const auto stick = get_on_processed_stick(); stick != 0) {
+        add_hook(stick, &MidHooks::on_processed_stick);
+    }
+
     add_hook(get_on_set_held_flags(), [](safetyhook::Context& context) {
         auto entity = Address(context.rcx).get(-0xCA0).as<sdk::Pl0000*>();
 
@@ -197,6 +261,10 @@ MidHooks::MidHooks() {
         }
     });
 
+    [this]<size_t... I>(std::index_sequence<I...>) {
+        (add_script_hook(k_traced_scripts[I], &on_traced_script<I>), ...);
+    }(std::make_index_sequence<k_traced_scripts.size()>{});
+
     spdlog::info("[MidHooks] Initialized.");
 }
 
@@ -204,6 +272,12 @@ void MidHooks::on_processed_buttons(safetyhook::Context& context) {
     // OLD VERSION USES R8. THE REGISTER IS THE CHARACTER CONTROLLER OF THE ENTITY.
     //auto entity = Address(info.context->R8).get(-0xCA0).as<Entity*>();
     auto entity = Address(context.rbx).get(-0xCA0).as<sdk::Pl0000*>();
+
+    // A remote player's puppet: the game just computed its buttons, speed and facing from the AI,
+    // replace them with the network input before the character acts on them.
+    if (const auto& client = AutomataMPMod::get()->get_client(); client != nullptr && client->apply_puppet_input(entity)) {
+        return;
+    }
 
     if (m_overriden_entities.count(entity) != 0) {
         // Only send the buttons of the character we control right now. After a player <-> buddy
@@ -231,6 +305,14 @@ void MidHooks::on_processed_buttons(safetyhook::Context& context) {
     }
 }
 
+void MidHooks::on_processed_stick(safetyhook::Context& context) {
+    auto entity = Address(context.rbx).get(-0xCA0).as<sdk::Pl0000*>();
+
+    if (const auto& client = AutomataMPMod::get()->get_client(); client != nullptr) {
+        client->apply_puppet_movement(entity);
+    }
+}
+
 sdk::Entity* MidHooks::on_entity_spawn(void* rcx, void* rdx) {
     // No lock may be held while calling into the game: when a cutscene starts the game spawns
     // from several threads and waits on its own locks inside the spawn function, a mutex held
@@ -250,6 +332,10 @@ sdk::Entity* MidHooks::on_entity_spawn(void* rcx, void* rdx) {
         if (entity->behavior->is_networkable()) {
             spdlog::info("[MidHooks] Spawned enemy: {}", spawnParams->name);
             AutomataMPMod::get()->on_entity_created(entity, spawnParams);
+        }
+
+        if (entity->behavior != nullptr && entity->behavior->model_index() == sdk::EModel::MODEL_FLIGHT_UNIT) {
+            AutomataMPMod::get()->on_flight_unit_spawned(entity);
         }
     }
 
@@ -376,6 +462,18 @@ void MidHooks::add_hook(uintptr_t address, MemberMidCallbackFn cb) {
     m_jit.add(&code_addr, &code);
 
     m_mid_hooks.emplace_back(builder.create_mid((void*)address, (safetyhook::MidHookFn)code_addr));
+}
+
+void MidHooks::add_script_hook(const char* name, safetyhook::MidHookFn cb) {
+    const auto script = sdk::ScriptFunctions::get().find(name);
+
+    if (script == nullptr || script->function == 0) {
+        spdlog::error("[MidHooks] Script function {} not found, not traced", name);
+        return;
+    }
+
+    add_hook(script->function, cb);
+    ScriptTracer::get().exclude(script->function);
 }
 
 void MidHooks::add_hook(uintptr_t address, safetyhook::MidHookFn cb) {

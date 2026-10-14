@@ -6,13 +6,10 @@ import (
 	structs "github.com/praydog/AutomataMP/server/automatamp/structs"
 
 	"github.com/codecat/go-enet"
-	"github.com/codecat/go-libs/log"
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
 func HandleAnimationStart(server *structs.Server, sender enet.Peer, connection *structs.Connection, data *nier.Packet) {
-	log.Info("Animation start received")
-
 	animationData := &nier.AnimationStart{}
 	flatbuffers.GetRootAs(data.DataBytes(), 0, animationData)
 

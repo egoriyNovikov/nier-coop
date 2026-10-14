@@ -1,6 +1,7 @@
 include "Packet.fbs";
 include "Hello.fbs";
 include "Welcome.fbs";
+include "Reject.fbs";
 include "EntityPacket.fbs";
 include "PlayerPacket.fbs";
 include "CreatePlayer.fbs";

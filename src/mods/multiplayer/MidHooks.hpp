@@ -30,6 +30,7 @@ public:
     MidHooks();
 
     void on_processed_buttons(safetyhook::Context& info);
+    void on_processed_stick(safetyhook::Context& info);
     void on_pre_entity_spawn(safetyhook::Context& info);
     void on_post_entity_spawn(safetyhook::Context& info);
     sdk::Entity* on_entity_spawn(void* rcx, void* rdx);
@@ -50,6 +51,7 @@ private:
     void add_hook(uintptr_t address, MemberInlineCallbackFn cb); // NOT thread safe yet!!!!
 
     safetyhook::InlineHook* add_inline_hook(uintptr_t address, void* cb);
+    void add_script_hook(const char* name, safetyhook::MidHookFn cb);
 
 private:
     std::recursive_mutex m_hook_mutex{};

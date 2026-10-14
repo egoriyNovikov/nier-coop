@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -33,7 +34,7 @@ func handleEnetEvent(ev enet.Event) {
 }
 
 func handleEnetConnectEvent(ev enet.Event) {
-	log.Info("New peer connected: %s", ev.GetPeer().GetAddress())
+	core.Event(currentServer, "Connection from %s", ev.GetPeer().GetAddress())
 	connection := &structs.Connection{}
 	connection.Peer = ev.GetPeer()
 	connection.Client = nil
@@ -41,29 +42,40 @@ func handleEnetConnectEvent(ev enet.Event) {
 }
 
 func handleEnetDisconnectEvent(ev enet.Event) {
-	log.Info("Peer disconnected: %s", ev.GetPeer().GetAddress())
 	connection := currentServer.Connections[ev.GetPeer()]
 
-	if connection != nil {
-		handleDisconnect(connection, ev.GetPeer())
+	if connection == nil {
+		return
 	}
+
+	if connection.Client == nil {
+		core.Event(currentServer, "Disconnected before joining: %s", ev.GetPeer().GetAddress())
+	}
+
+	handleDisconnect(connection, ev.GetPeer())
 }
 
 func handleDisconnect(connection *structs.Connection, peer enet.Peer) {
-	isMasterClient := connection.Client != nil && connection.Client.IsMasterClient
+	client := connection.Client
 
-	if connection.Client != nil {
+	if client != nil {
+		core.Event(currentServer, "Left: %s (guid %d), played %s", client.Name, client.Guid, time.Since(client.JoinedAt).Round(time.Second))
+
 		handlers.HandleDestroyPlayer(currentServer, connection)
 		delete(currentServer.Clients, connection)
-	}
 
-	if isMasterClient {
-		handlers.HandleNewMasterClient(currentServer)
-	}
+		// Nobody takes over the story: the other player waits for the host to come back.
+		if client.IsMasterClient && len(currentServer.Clients) > 0 {
+			core.Event(currentServer, "%s led the story, nobody leads until a host joins", client.Name)
+			handlers.BroadcastMasterClient(currentServer, 0)
+		}
 
-	if len(currentServer.Clients) == 0 {
-		currentServer.Entities = make(structs.EntityList)
-		currentServer.HighestEntityGuid = 0
+		if len(currentServer.Clients) == 0 {
+			core.Event(currentServer, "Session ended after %s", time.Since(currentServer.SessionStarted).Round(time.Second))
+			currentServer.Entities = make(structs.EntityList)
+			currentServer.HighestEntityGuid = 0
+			currentServer.SessionId = 0
+		}
 	}
 
 	delete(currentServer.Connections, peer)
@@ -76,10 +88,18 @@ func handleEnetReceiveEvent(ev enet.Event) {
 	defer packet.Destroy()
 	packetBytes := packet.GetData()
 
+	currentServer.Traffic.PacketsIn++
+	currentServer.Traffic.BytesIn += uint64(len(packetBytes))
+
+	// A broken or malicious packet must not take the server down for the other player.
+	defer func() {
+		if r := recover(); r != nil {
+			core.Problem(currentServer, "Bad packet (%d bytes) from %s: %v", len(packetBytes), ev.GetPeer().GetAddress(), r)
+		}
+	}()
+
 	if checkClientIsAuthorized(ev, packetBytes) {
 		handlers.PacketHandler(currentServer, connection, ev.GetPeer(), packetBytes)
-	} else {
-		log.Info("Client unauthorized")
 	}
 }
 
@@ -87,25 +107,69 @@ func checkClientIsAuthorized(ev enet.Event, data []byte) bool {
 	connection := currentServer.Connections[ev.GetPeer()]
 
 	if connection == nil {
-		log.Error("Received data from unknown peer, ignoring")
+		core.Problem(currentServer, "Data from unknown peer %s, ignoring", ev.GetPeer().GetAddress())
 		return false
 	}
 
-	if connection.Client == nil {
-		log.Info("Peer %s sent data %d bytes", ev.GetPeer().GetAddress().String(), len(data))
-		data := nier.GetRootAsPacket(data, 0)
+	packet := nier.GetRootAsPacket(data, 0)
 
-		if !core.CheckValidPacket(data) {
-			return false
-		}
+	if !core.CheckValidPacket(packet) {
+		core.Problem(currentServer, "Invalid packet (%d bytes) from %s", len(data), ev.GetPeer().GetAddress())
+		return false
+	}
 
-		if data.Id() != nier.PacketTypeID_HELLO {
-			log.Error("Received packet before hello was sent, discarding")
-			return false
-		}
+	if connection.Client == nil && packet.Id() != nier.PacketTypeID_HELLO {
+		core.Problem(currentServer, "Packet %d from %s before hello, ignoring", packet.Id(), ev.GetPeer().GetAddress())
+		return false
 	}
 
 	return true
+}
+
+// One line a minute while someone plays: players, traffic and round trip times.
+func logStatistics() {
+	elapsed := time.Since(currentServer.LastStats).Seconds()
+	traffic := currentServer.Traffic
+
+	currentServer.LastStats = time.Now()
+	currentServer.Traffic = structs.Traffic{}
+
+	if len(currentServer.Clients) == 0 || elapsed <= 0 {
+		return
+	}
+
+	players := ""
+
+	for _, client := range currentServer.Clients {
+		rtt := "?"
+		if client.Rtt > 0 {
+			rtt = client.Rtt.Round(time.Millisecond).String()
+		}
+
+		lead := ""
+		if client.IsMasterClient {
+			lead = " leads"
+		}
+
+		players += fmt.Sprintf(" | %s rtt %s%s", client.Name, rtt, lead)
+	}
+
+	core.Event(currentServer, "Stats: %d players, in %.0f pkt/s %.1f KB/s, out %.0f pkt/s %.1f KB/s%s",
+		len(currentServer.Clients),
+		float64(traffic.PacketsIn)/elapsed, float64(traffic.BytesIn)/elapsed/1024,
+		float64(traffic.PacketsOut)/elapsed, float64(traffic.BytesOut)/elapsed/1024,
+		players)
+}
+
+func periodicTasks() {
+	if time.Since(currentServer.LastPing) >= 5*time.Second {
+		currentServer.LastPing = time.Now()
+		handlers.SendPings(currentServer)
+	}
+
+	if time.Since(currentServer.LastStats) >= time.Minute {
+		logStatistics()
+	}
 }
 
 func service() {
@@ -121,7 +185,6 @@ func service() {
 		// so we can perform other tasks. We will handle the rest
 		// next time we call Service.
 		if evHandleCount >= 100 {
-			log.Info("Handled 100 events, breaking")
 			break
 		}
 
@@ -226,8 +289,9 @@ func Run() {
 		port = 6969
 	}
 
-	// Create a host listening on 0.0.0.0:6969
-	host, err := enet.NewHost(enet.NewListenAddress(uint16(port)), 32, 1, 0, 0)
+	// Create a host listening on 0.0.0.0:6969. A few spare peer slots let extra players
+	// connect and receive the reason why they can't join (the game allows 2 players).
+	host, err := enet.NewHost(enet.NewListenAddress(uint16(port)), handlers.MaxPlayers+4, 1, 0, 0)
 	if err != nil {
 		log.Error("Couldn't create host: %s", err.Error())
 		panic(err)
@@ -239,9 +303,12 @@ func Run() {
 
 	go heartbeatGoroutine()
 
+	currentServer.LastStats = time.Now()
+
 	// The event loop
 	for {
 		service()
+		periodicTasks()
 	}
 }
 
@@ -269,7 +336,11 @@ func CreateServer() {
 	currentServer.Config["port"] = "6969"
 
 	json.Unmarshal(serverJson, &currentServer.Config)
-	log.Info("Server password: %s", currentServer.Config["password"].(string))
+	if currentServer.Config["password"].(string) == "" {
+		log.Info("No password set, anyone can join")
+	} else {
+		log.Info("Password set")
+	}
 
 	Run()
 }

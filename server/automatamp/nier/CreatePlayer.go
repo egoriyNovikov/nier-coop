@@ -65,8 +65,20 @@ func (rcv *CreatePlayer) MutateModel(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(8, n)
 }
 
+func (rcv *CreatePlayer) IsMasterClient() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *CreatePlayer) MutateIsMasterClient(n bool) bool {
+	return rcv._tab.MutateBoolSlot(10, n)
+}
+
 func CreatePlayerStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func CreatePlayerAddGuid(builder *flatbuffers.Builder, guid uint64) {
 	builder.PrependUint64Slot(0, guid, 0)
@@ -76,6 +88,9 @@ func CreatePlayerAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT
 }
 func CreatePlayerAddModel(builder *flatbuffers.Builder, model uint32) {
 	builder.PrependUint32Slot(2, model, 0)
+}
+func CreatePlayerAddIsMasterClient(builder *flatbuffers.Builder, isMasterClient bool) {
+	builder.PrependBoolSlot(3, isMasterClient, false)
 }
 func CreatePlayerEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

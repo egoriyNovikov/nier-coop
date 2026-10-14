@@ -43,10 +43,24 @@ public:
         }
     }
 
+    void on_flight_unit_spawned(sdk::Entity* entity) {
+        if (m_client != nullptr) {
+            m_client->on_flight_unit_spawned(entity);
+        }
+    }
+
+    void on_story_script(const char* name, sdk::Behavior* self) {
+        if (m_client != nullptr) {
+            m_client->on_story_script(name, self);
+        }
+    }
+
     void on_draw_ui() override;
     void on_frame() override;
     void on_think() override;
     void shared_think();
+    void debug_hotkeys(sdk::EntityList* entity_list, sdk::Entity* player);
+    void log_world_state(const char* state);
     std::tuple<std::string, std::string> validate_connection(std::string ip, std::string port);
     void signal_destroy_client() {
         m_wants_destroy_client = true;
@@ -75,7 +89,7 @@ private:
 
 private:
     void display_coop();
-    void start_connect(const std::string& host, const std::string& port, bool is_host);
+    void start_connect(const std::string& host, const std::string& port, bool is_host, bool wants_host);
     void update_connection();
     void destroy_client();
 
@@ -84,6 +98,7 @@ private:
         std::string port;
         std::chrono::steady_clock::time_point next_attempt;
         int attempts_left;
+        bool wants_host;
     };
 
     CoopServer m_coop_server;
@@ -94,6 +109,15 @@ private:
     bool m_coop_auto_swap{true};
     bool m_coop_spawn_partner{false};
     bool m_coop_sync_enemies{false};
+    bool m_coop_puppet_as_player{true};
+    bool m_coop_smooth_position{true};
+    bool m_coop_share_enemy_deaths{true};
+    bool m_debug_hotkeys{false};
+    bool m_trace_scripts{false};
+    // "Join Game" as the player leading the story (dedicated server, both players press Join).
+    bool m_join_as_host{false};
+    // Last "no player" reason written to the log, nullptr when the player is fine.
+    const char* m_world_state{nullptr};
     std::array<char, 256> m_join_address_input{};
     std::array<char, 16> m_host_port_input{};
 

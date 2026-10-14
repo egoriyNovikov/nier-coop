@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace sdk {
 struct ScriptFunction {
@@ -22,6 +23,8 @@ public:
     ScriptFunctions();
 
     ScriptFunction* find(const std::string& name);
+    // Every registered script function (the table only has CRC32 of the names).
+    std::vector<ScriptFunction*> all();
 
 private:
     ScriptFunction** m_script_functions;

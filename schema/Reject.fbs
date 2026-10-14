@@ -1,0 +1,18 @@
+namespace nier;
+
+enum RejectReason : ubyte {
+    Unknown = 0,
+    WrongPassword,
+    VersionMismatch,
+    InvalidModel,
+    ServerFull,
+    HostTaken,
+}
+
+// Sent by the server right before it disconnects a player that can't join.
+table Reject {
+    reason: RejectReason;
+    detail: string; // Human readable details, e.g. the server version.
+}
+
+root_type Reject;

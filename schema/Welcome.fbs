@@ -4,6 +4,7 @@ table Welcome {
     guid: ulong;
     isMasterClient: bool;
     highestEntityGuid: uint;
+    sessionId: uint; // Same number in the server log and in the logs of both players.
 }
 
 root_type Welcome;

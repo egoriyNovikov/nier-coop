@@ -97,8 +97,28 @@ func (rcv *Hello) MutateModel(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(14, n)
 }
 
+func (rcv *Hello) WantsHost() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *Hello) MutateWantsHost(n bool) bool {
+	return rcv._tab.MutateBoolSlot(16, n)
+}
+
+func (rcv *Hello) ModVersion() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
 func HelloStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(8)
 }
 func HelloAddMajor(builder *flatbuffers.Builder, major uint32) {
 	builder.PrependUint32Slot(0, major, 0)
@@ -117,6 +137,12 @@ func HelloAddPassword(builder *flatbuffers.Builder, password flatbuffers.UOffset
 }
 func HelloAddModel(builder *flatbuffers.Builder, model uint32) {
 	builder.PrependUint32Slot(5, model, 0)
+}
+func HelloAddWantsHost(builder *flatbuffers.Builder, wantsHost bool) {
+	builder.PrependBoolSlot(6, wantsHost, false)
+}
+func HelloAddModVersion(builder *flatbuffers.Builder, modVersion flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(modVersion), 0)
 }
 func HelloEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

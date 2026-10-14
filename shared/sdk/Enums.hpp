@@ -67,6 +67,7 @@ enum EAnimation {
 
 enum EModel {
     MODEL_2B = 0x10000,
+    MODEL_FLIGHT_UNIT = 0x10010, // pl0010, a separate entity the character rides (prologue bridge, flight phases)
     MODEL_A2 = 0x10100,
     MODEL_9S = 0x10200,
 };

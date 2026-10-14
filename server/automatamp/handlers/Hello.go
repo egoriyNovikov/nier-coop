@@ -1,132 +1,153 @@
 package handlers
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/codecat/go-enet"
-	"github.com/codecat/go-libs/log"
 	flatbuffers "github.com/google/flatbuffers/go"
 	core "github.com/praydog/AutomataMP/server/automatamp/core"
 	nier "github.com/praydog/AutomataMP/server/automatamp/nier"
 	structs "github.com/praydog/AutomataMP/server/automatamp/structs"
 )
 
-func HandleHello(server *structs.Server, sender enet.Peer, connection *structs.Connection, data *nier.Packet) {
-	log.Info("Hello packet received")
+// The mod is made for exactly two players (docs/COOP_CONCEPT.md, principle 3).
+const MaxPlayers = 2
 
-	if connection.Client != nil {
-		log.Error("Received hello packet from client that already has a client, discarding")
-		return
-	}
+// Tells the player why it can't join, then disconnects once the packet is delivered.
+func reject(server *structs.Server, sender enet.Peer, name string, reason nier.RejectReason, detail string) {
+	core.Event(server, "Rejected %s (%s): %s %s", name, sender.GetAddress(), nier.EnumNamesRejectReason[reason], detail)
 
-	helloData := nier.GetRootAsHello(data.DataBytes(), 0)
-
-	if helloData.Major() != uint32(nier.VersionMajorValue) {
-		log.Error("Invalid major version: %d", helloData.Major())
-		sender.DisconnectNow(0)
-		return
-	}
-
-	if helloData.Minor() > uint32(nier.VersionMinorValue) {
-		log.Error("Client is newer than server, disconnecting")
-		sender.DisconnectNow(0)
-		return
-	}
-
-	if helloData.Patch() != uint32(nier.VersionPatchValue) {
-		log.Info("Minor version mismatch, this is okay")
-	}
-
-	log.Info("Version check passed")
-
-	if server.Config["password"].(string) != "" {
-		if string(helloData.Password()) != server.Config["password"].(string) {
-			log.Error("Invalid password, client sent: \"%s\"", string(helloData.Password()))
-			sender.DisconnectNow(0)
-			return
-		}
-	}
-
-	log.Info("Password check passed")
-
-	if _, ok := nier.EnumNamesModelType[nier.ModelType(helloData.Model())]; !ok {
-		log.Error("Invalid model type: %d", helloData.Model())
-		sender.DisconnectNow(0)
-		return
-	}
-
-	log.Info("Model type check passed")
-
-	clientName := core.GetFilteredPlayerName(server, helloData.Name())
-
-	server.ConnectionCount++
-
-	// Create a new client for the peer
-	client := &structs.Client{
-		Guid:  server.ConnectionCount,
-		Name:  clientName,
-		Model: helloData.Model(),
-
-		// Allows the first person that connects to be the master client
-		// In an ideal world, the server would run all of the simulation logic
-		// like movement, physics, enemy AI & movement, but this would be
-		// a monumental task because this is a mod, not a game where we have the source code.
-		// So we let the master client control the simulation.
-		IsMasterClient: len(server.Clients) == 0,
-	}
-
-	log.Info("Client name: %s", clientName)
-	log.Info("Client GUID: %d", client.Guid)
-	log.Info("Client is master client: %t", client.IsMasterClient)
-	log.Info("Client model: %s", nier.EnumNamesModelType[nier.ModelType(helloData.Model())])
-
-	// Add the client to the map
-	connection.Client = client
-	server.Clients[connection] = client
-
-	// Send a welcome packet
-	welcomeBytes := core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-		nier.WelcomeStart(builder)
-		nier.WelcomeAddGuid(builder, client.Guid)
-		nier.WelcomeAddIsMasterClient(builder, client.IsMasterClient)
-		nier.WelcomeAddHighestEntityGuid(builder, server.HighestEntityGuid)
-		return nier.WelcomeEnd(builder)
+	rejectBytes := core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+		detailOffset := builder.CreateString(detail)
+		nier.RejectStart(builder)
+		nier.RejectAddReason(builder, reason)
+		nier.RejectAddDetail(builder, detailOffset)
+		return nier.RejectEnd(builder)
 	})
 
-	log.Info("Sending welcome packet")
-	sender.SendBytes(core.MakePacketBytes(nier.PacketTypeID_WELCOME, welcomeBytes), 0, enet.PacketFlagReliable)
+	core.Send(server, sender, core.MakePacketBytes(nier.PacketTypeID_REJECT, rejectBytes))
+	sender.DisconnectLater(uint32(reason))
+}
 
-	// Send the player creation packet
-	createPlayerBytes := core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+func makeCreatePlayer(client *structs.Client) []uint8 {
+	return core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 		playerName := builder.CreateString(client.Name)
 		nier.CreatePlayerStart(builder)
 		nier.CreatePlayerAddGuid(builder, client.Guid)
 		nier.CreatePlayerAddName(builder, playerName)
 		nier.CreatePlayerAddModel(builder, client.Model)
+		nier.CreatePlayerAddIsMasterClient(builder, client.IsMasterClient)
 		return nier.CreatePlayerEnd(builder)
 	})
+}
 
-	log.Info("Sending create player packet to everyone")
-	core.BroadcastPacketToAll(server, nier.PacketTypeID_CREATE_PLAYER, createPlayerBytes)
+func HandleHello(server *structs.Server, sender enet.Peer, connection *structs.Connection, data *nier.Packet) {
+	if connection.Client != nil {
+		core.Problem(server, "Second hello from %s, ignoring", connection.Client.Name)
+		return
+	}
 
-	// Broadcast previously connected clients to the new client
+	helloData := nier.GetRootAsHello(data.DataBytes(), 0)
+	name := string(helloData.Name())
+	modVersion := string(helloData.ModVersion())
+
+	if helloData.Major() != uint32(nier.VersionMajorValue) {
+		reject(server, sender, name, nier.RejectReasonVersionMismatch,
+			fmt.Sprintf("server protocol %d, player protocol %d (mod %s)", nier.VersionMajorValue, helloData.Major(), modVersion))
+		return
+	}
+
+	if password := server.Config["password"].(string); password != "" && string(helloData.Password()) != password {
+		reject(server, sender, name, nier.RejectReasonWrongPassword, "")
+		return
+	}
+
+	if _, ok := nier.EnumNamesModelType[nier.ModelType(helloData.Model())]; !ok {
+		reject(server, sender, name, nier.RejectReasonInvalidModel, fmt.Sprintf("model %x", helloData.Model()))
+		return
+	}
+
+	if len(server.Clients) >= MaxPlayers {
+		reject(server, sender, name, nier.RejectReasonServerFull, fmt.Sprintf("%d players already", len(server.Clients)))
+		return
+	}
+
+	if helloData.WantsHost() {
+		if host := FindWantsHost(server); host != nil {
+			reject(server, sender, name, nier.RejectReasonHostTaken, "the host is "+host.Name)
+			return
+		}
+	}
+
+	if len(server.Clients) == 0 {
+		server.SessionId = uint32(time.Now().Unix())
+		server.SessionStarted = time.Now()
+		core.Event(server, "Session started")
+	}
+
+	server.ConnectionCount++
+
+	client := &structs.Client{
+		Guid:       server.ConnectionCount,
+		Name:       core.GetFilteredPlayerName(server, helloData.Name()),
+		Model:      helloData.Model(),
+		ModVersion: modVersion,
+		WantsHost:  helloData.WantsHost(),
+		JoinedAt:   time.Now(),
+	}
+
+	// The host leads the story no matter who joined first. Without a host (nobody picked the host
+	// role) the first player leads, as before. When the leader leaves, nobody else takes over:
+	// the remaining player waits, and whoever joins next while nobody leads becomes the leader.
+	previous := GetMasterClient(server)
+
+	if client.WantsHost && previous != nil {
+		previous.IsMasterClient = false
+	}
+
+	client.IsMasterClient = client.WantsHost || previous == nil
+
+	connection.Client = client
+	server.Clients[connection] = client
+
+	role := "client"
+	if client.IsMasterClient {
+		role = "leads the story"
+	}
+
+	core.Event(server, "Joined: %s (guid %d, %s, mod %s, model %s, host role %t) -> %s",
+		client.Name, client.Guid, sender.GetAddress(), modVersion,
+		nier.EnumNamesModelType[nier.ModelType(client.Model)], client.WantsHost, role)
+
+	welcomeBytes := core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+		nier.WelcomeStart(builder)
+		nier.WelcomeAddGuid(builder, client.Guid)
+		nier.WelcomeAddIsMasterClient(builder, client.IsMasterClient)
+		nier.WelcomeAddHighestEntityGuid(builder, server.HighestEntityGuid)
+		nier.WelcomeAddSessionId(builder, server.SessionId)
+		return nier.WelcomeEnd(builder)
+	})
+
+	core.Send(server, sender, core.MakePacketBytes(nier.PacketTypeID_WELCOME, welcomeBytes))
+
+	if client.WantsHost && previous != nil {
+		core.Event(server, "%s takes the story lead from %s", client.Name, previous.Name)
+		BroadcastMasterClient(server, client.Guid)
+	}
+
+	core.BroadcastPacketToAll(server, nier.PacketTypeID_CREATE_PLAYER, makeCreatePlayer(client))
+
+	// The players that were already here.
 	for _, prevClient := range server.Clients {
-		if prevClient == nil || prevClient == client { // Skip the new client
+		if prevClient == nil || prevClient == client {
 			continue
 		}
 
-		createPlayerBytes := core.BuilderSurround(func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-			playerName := builder.CreateString(prevClient.Name)
-			nier.CreatePlayerStart(builder)
-			nier.CreatePlayerAddGuid(builder, prevClient.Guid)
-			nier.CreatePlayerAddName(builder, playerName)
-			nier.CreatePlayerAddModel(builder, prevClient.Model)
-			return nier.CreatePlayerEnd(builder)
-		})
-
-		log.Info("Sending create player packet for previous client %d to client %d", prevClient.Guid, client.Guid)
-		sender.SendBytes(core.MakePacketBytes(nier.PacketTypeID_CREATE_PLAYER, createPlayerBytes), 0, enet.PacketFlagReliable)
+		core.Send(server, sender, core.MakePacketBytes(nier.PacketTypeID_CREATE_PLAYER, makeCreatePlayer(prevClient)))
 	}
 
-	// Broadcast previously spawned entities to the new client
+	// Enemies of the master client (only used with "Shared enemies from the host").
 	for _, entity := range server.Entities {
 		if entity == nil {
 			continue
@@ -155,9 +176,6 @@ func HandleHello(server *structs.Server, sender enet.Peer, connection *structs.C
 			return nier.EntitySpawnParamsEnd(builder)
 		})
 
-		spawnPacket := core.MakeEntityPacketBytes(entity.Guid, nier.PacketTypeID_SPAWN_ENTITY, spawnData)
-
-		log.Info("Sending spawn entity packet for entity %d to client %d", entity.Guid, client.Guid)
-		sender.SendBytes(spawnPacket, 0, enet.PacketFlagReliable)
+		core.Send(server, sender, core.MakeEntityPacketBytes(entity.Guid, nier.PacketTypeID_SPAWN_ENTITY, spawnData))
 	}
 }

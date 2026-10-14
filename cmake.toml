@@ -137,6 +137,16 @@ link-libraries = [
     "winhttp"
 ]
 
+cmake-after = """
+# The git revision goes into the DLL (see src/Version.hpp), refreshed on every build.
+add_custom_target(automatamp_git_revision
+	COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT_FILE=${CMAKE_BINARY_DIR}/generated/GitRevision.hpp -P ${CMAKE_SOURCE_DIR}/cmake/GitRevision.cmake
+	BYPRODUCTS ${CMAKE_BINARY_DIR}/generated/GitRevision.hpp
+)
+add_dependencies(automatamp automatamp_git_revision)
+target_include_directories(automatamp PRIVATE ${CMAKE_BINARY_DIR}/generated)
+"""
+
 [target.automatamp.properties]
 OUTPUT_NAME = "dinput8"
 RUNTIME_OUTPUT_DIRECTORY_RELEASE = "${CMAKE_BINARY_DIR}/bin/${CMKR_TARGET}"

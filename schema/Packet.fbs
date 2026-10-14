@@ -17,6 +17,7 @@ enum PacketType : uint {
     ID_CREATE_PLAYER,
     ID_DESTROY_PLAYER,
     ID_SET_MASTER_CLIENT,
+    ID_REJECT,
     ID_SERVER_END,
 
     // Packets sent from basic clients to the server.
@@ -26,6 +27,7 @@ enum PacketType : uint {
     ID_ANIMATION_START,
     ID_CHANGE_PLAYER,
     ID_BUTTONS,
+    ID_ENEMY_DIED, // An enemy of the sender's own story died (EnemyDied).
     ID_CLIENT_END,
 
     ID_PING = 32768,

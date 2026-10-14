@@ -56,6 +56,11 @@ public:
     Entity* get_by_handle(uint32_t handle);
     Entity* get_possessed_entity();
 
+    // Only writes the game's player handle, without the game's switch logic (camera, AI flags).
+    // Last resort when the player character is already gone: the game's own switch (base + 0x7c1fe0,
+    // called by Pl0000.changePlayer) crashes without a current player.
+    static bool force_possessed_handle(uint32_t handle);
+
     using SpawnFunction = Entity* (*)(void*, const EntitySpawnParams&);
     using SpawnThis = void*;
     static std::tuple<SpawnFunction, SpawnThis> get_spawn_entity_fn();

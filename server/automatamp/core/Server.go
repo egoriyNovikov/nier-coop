@@ -7,14 +7,12 @@ import (
 	structs "github.com/praydog/AutomataMP/server/automatamp/structs"
 
 	"github.com/codecat/go-enet"
-	"github.com/codecat/go-libs/log"
 )
 
 func GetFilteredPlayerName(server *structs.Server, input []uint8) string {
 	out := ""
 
 	if input == nil || string(input) == "" {
-		log.Error("Client sent empty name, assigning random name")
 		out = "Client" + strconv.FormatInt(int64(len(server.Connections)), 10)
 	} else {
 		out = string(input)
@@ -22,7 +20,6 @@ func GetFilteredPlayerName(server *structs.Server, input []uint8) string {
 
 	for _, client := range server.Clients {
 		if client.Name == out {
-			log.Error("Client sent duplicate name, appending number")
 			out = out + strconv.FormatInt(int64(len(server.Connections)), 10)
 			break
 		}
@@ -31,10 +28,17 @@ func GetFilteredPlayerName(server *structs.Server, input []uint8) string {
 	return out
 }
 
+// Every packet the server sends goes through here, so the statistics see it.
+func Send(server *structs.Server, peer enet.Peer, data []uint8) {
+	server.Traffic.PacketsOut++
+	server.Traffic.BytesOut += uint64(len(data))
+	peer.SendBytes(data, 0, enet.PacketFlagReliable)
+}
+
 func BroadcastPacketToAll(server *structs.Server, id nier.PacketType, data []uint8) {
 	broadcastData := MakePacketBytes(id, data)
 	for conn := range server.Clients {
-		conn.Peer.SendBytes(broadcastData, 0, enet.PacketFlagReliable)
+		Send(server, conn.Peer, broadcastData)
 	}
 }
 
@@ -45,7 +49,7 @@ func BroadcastPacketToAllExceptSender(server *structs.Server, sender enet.Peer, 
 			continue
 		}
 
-		conn.Peer.SendBytes(broadcastData, 0, enet.PacketFlagReliable)
+		Send(server, conn.Peer, broadcastData)
 	}
 }
 
@@ -53,7 +57,7 @@ func BroadcastPlayerPacketToAll(server *structs.Server, connection *structs.Conn
 	broadcastData := MakePlayerPacketBytes(connection.Client.Guid, id, data)
 
 	for conn := range server.Clients {
-		conn.Peer.SendBytes(broadcastData, 0, enet.PacketFlagReliable)
+		Send(server, conn.Peer, broadcastData)
 	}
 }
 
@@ -65,6 +69,6 @@ func BroadcastPlayerPacketToAllExceptSender(server *structs.Server, sender enet.
 			continue
 		}
 
-		conn.Peer.SendBytes(broadcastData, 0, enet.PacketFlagReliable)
+		Send(server, conn.Peer, broadcastData)
 	}
 }

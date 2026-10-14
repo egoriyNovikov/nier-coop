@@ -74,4 +74,22 @@ ScriptFunction* ScriptFunctions::find(const std::string& name) {
 
     return nullptr;
 }
+
+std::vector<ScriptFunction*> ScriptFunctions::all() {
+    std::vector<ScriptFunction*> result{};
+
+    if (m_script_functions == nullptr) {
+        return result;
+    }
+
+    for (auto script = *m_script_functions; script != nullptr; script = script->next) {
+        result.push_back(script);
+
+        if (script->next == *m_script_functions) {
+            break;
+        }
+    }
+
+    return result;
+}
 }

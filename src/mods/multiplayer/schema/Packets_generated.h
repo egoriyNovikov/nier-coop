@@ -21,6 +21,9 @@ struct HelloBuilder;
 struct Welcome;
 struct WelcomeBuilder;
 
+struct Reject;
+struct RejectBuilder;
+
 struct EntityPacket;
 struct EntityPacketBuilder;
 
@@ -34,6 +37,8 @@ struct EntityData;
 struct PlayerData;
 
 struct AnimationStart;
+
+struct EnemyDied;
 
 struct Buttons;
 struct ButtonsBuilder;
@@ -59,13 +64,15 @@ enum PacketType : uint32_t {
   PacketType_ID_CREATE_PLAYER = 2049,
   PacketType_ID_DESTROY_PLAYER = 2050,
   PacketType_ID_SET_MASTER_CLIENT = 2051,
-  PacketType_ID_SERVER_END = 2052,
+  PacketType_ID_REJECT = 2052,
+  PacketType_ID_SERVER_END = 2053,
   PacketType_ID_CLIENT_START = 4096,
   PacketType_ID_PLAYER_DATA = 4097,
   PacketType_ID_ANIMATION_START = 4098,
   PacketType_ID_CHANGE_PLAYER = 4099,
   PacketType_ID_BUTTONS = 4100,
-  PacketType_ID_CLIENT_END = 4101,
+  PacketType_ID_ENEMY_DIED = 4101,
+  PacketType_ID_CLIENT_END = 4102,
   PacketType_ID_PING = 32768,
   PacketType_ID_PONG = 32769,
   PacketType_ID_HELLO = 32770,
@@ -74,7 +81,7 @@ enum PacketType : uint32_t {
   PacketType_MAX = PacketType_ID_WELCOME
 };
 
-inline const PacketType (&EnumValuesPacketType())[21] {
+inline const PacketType (&EnumValuesPacketType())[23] {
   static const PacketType values[] = {
     PacketType_ID_MASTER_CLIENT_START,
     PacketType_ID_SPAWN_ENTITY,
@@ -86,12 +93,14 @@ inline const PacketType (&EnumValuesPacketType())[21] {
     PacketType_ID_CREATE_PLAYER,
     PacketType_ID_DESTROY_PLAYER,
     PacketType_ID_SET_MASTER_CLIENT,
+    PacketType_ID_REJECT,
     PacketType_ID_SERVER_END,
     PacketType_ID_CLIENT_START,
     PacketType_ID_PLAYER_DATA,
     PacketType_ID_ANIMATION_START,
     PacketType_ID_CHANGE_PLAYER,
     PacketType_ID_BUTTONS,
+    PacketType_ID_ENEMY_DIED,
     PacketType_ID_CLIENT_END,
     PacketType_ID_PING,
     PacketType_ID_PONG,
@@ -113,12 +122,14 @@ inline const char *EnumNamePacketType(PacketType e) {
     case PacketType_ID_CREATE_PLAYER: return "ID_CREATE_PLAYER";
     case PacketType_ID_DESTROY_PLAYER: return "ID_DESTROY_PLAYER";
     case PacketType_ID_SET_MASTER_CLIENT: return "ID_SET_MASTER_CLIENT";
+    case PacketType_ID_REJECT: return "ID_REJECT";
     case PacketType_ID_SERVER_END: return "ID_SERVER_END";
     case PacketType_ID_CLIENT_START: return "ID_CLIENT_START";
     case PacketType_ID_PLAYER_DATA: return "ID_PLAYER_DATA";
     case PacketType_ID_ANIMATION_START: return "ID_ANIMATION_START";
     case PacketType_ID_CHANGE_PLAYER: return "ID_CHANGE_PLAYER";
     case PacketType_ID_BUTTONS: return "ID_BUTTONS";
+    case PacketType_ID_ENEMY_DIED: return "ID_ENEMY_DIED";
     case PacketType_ID_CLIENT_END: return "ID_CLIENT_END";
     case PacketType_ID_PING: return "ID_PING";
     case PacketType_ID_PONG: return "ID_PONG";
@@ -129,7 +140,7 @@ inline const char *EnumNamePacketType(PacketType e) {
 }
 
 enum VersionMajor : uint32_t {
-  VersionMajor_Value = 1,
+  VersionMajor_Value = 3,
   VersionMajor_MIN = VersionMajor_Value,
   VersionMajor_MAX = VersionMajor_Value
 };
@@ -207,6 +218,48 @@ inline const char *EnumNameVersionPatch(VersionPatch e) {
   if (flatbuffers::IsOutRange(e, VersionPatch_Value, VersionPatch_Value)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesVersionPatch()[index];
+}
+
+enum RejectReason : uint8_t {
+  RejectReason_Unknown = 0,
+  RejectReason_WrongPassword = 1,
+  RejectReason_VersionMismatch = 2,
+  RejectReason_InvalidModel = 3,
+  RejectReason_ServerFull = 4,
+  RejectReason_HostTaken = 5,
+  RejectReason_MIN = RejectReason_Unknown,
+  RejectReason_MAX = RejectReason_HostTaken
+};
+
+inline const RejectReason (&EnumValuesRejectReason())[6] {
+  static const RejectReason values[] = {
+    RejectReason_Unknown,
+    RejectReason_WrongPassword,
+    RejectReason_VersionMismatch,
+    RejectReason_InvalidModel,
+    RejectReason_ServerFull,
+    RejectReason_HostTaken
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesRejectReason() {
+  static const char * const names[7] = {
+    "Unknown",
+    "WrongPassword",
+    "VersionMismatch",
+    "InvalidModel",
+    "ServerFull",
+    "HostTaken",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameRejectReason(RejectReason e) {
+  if (flatbuffers::IsOutRange(e, RejectReason_Unknown, RejectReason_HostTaken)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesRejectReason()[index];
 }
 
 enum ModelType : uint32_t {
@@ -538,6 +591,35 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) AnimationStart FLATBUFFERS_FINAL_CLASS {
 };
 FLATBUFFERS_STRUCT_END(AnimationStart, 16);
 
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) EnemyDied FLATBUFFERS_FINAL_CLASS {
+ private:
+  uint32_t model_;
+  nier::Vector3f spawn_position_;
+  nier::Vector3f position_;
+
+ public:
+  EnemyDied()
+      : model_(0),
+        spawn_position_(),
+        position_() {
+  }
+  EnemyDied(uint32_t _model, const nier::Vector3f &_spawn_position, const nier::Vector3f &_position)
+      : model_(flatbuffers::EndianScalar(_model)),
+        spawn_position_(_spawn_position),
+        position_(_position) {
+  }
+  uint32_t model() const {
+    return flatbuffers::EndianScalar(model_);
+  }
+  const nier::Vector3f &spawn_position() const {
+    return spawn_position_;
+  }
+  const nier::Vector3f &position() const {
+    return position_;
+  }
+};
+FLATBUFFERS_STRUCT_END(EnemyDied, 28);
+
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(8) DestroyPlayer FLATBUFFERS_FINAL_CLASS {
  private:
   uint64_t guid_;
@@ -655,7 +737,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_PATCH = 8,
     VT_NAME = 10,
     VT_PASSWORD = 12,
-    VT_MODEL = 14
+    VT_MODEL = 14,
+    VT_WANTS_HOST = 16,
+    VT_MOD_VERSION = 18
   };
   uint32_t major() const {
     return GetField<uint32_t>(VT_MAJOR, 0);
@@ -675,6 +759,12 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t model() const {
     return GetField<uint32_t>(VT_MODEL, 0);
   }
+  bool wants_host() const {
+    return GetField<uint8_t>(VT_WANTS_HOST, 0) != 0;
+  }
+  const flatbuffers::String *mod_version() const {
+    return GetPointer<const flatbuffers::String *>(VT_MOD_VERSION);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_MAJOR) &&
@@ -685,6 +775,9 @@ struct Hello FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyOffset(verifier, VT_PASSWORD) &&
            verifier.VerifyString(password()) &&
            VerifyField<uint32_t>(verifier, VT_MODEL) &&
+           VerifyField<uint8_t>(verifier, VT_WANTS_HOST) &&
+           VerifyOffset(verifier, VT_MOD_VERSION) &&
+           verifier.VerifyString(mod_version()) &&
            verifier.EndTable();
   }
 };
@@ -711,6 +804,12 @@ struct HelloBuilder {
   void add_model(uint32_t model) {
     fbb_.AddElement<uint32_t>(Hello::VT_MODEL, model, 0);
   }
+  void add_wants_host(bool wants_host) {
+    fbb_.AddElement<uint8_t>(Hello::VT_WANTS_HOST, static_cast<uint8_t>(wants_host), 0);
+  }
+  void add_mod_version(flatbuffers::Offset<flatbuffers::String> mod_version) {
+    fbb_.AddOffset(Hello::VT_MOD_VERSION, mod_version);
+  }
   explicit HelloBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -729,14 +828,18 @@ inline flatbuffers::Offset<Hello> CreateHello(
     uint32_t patch = 0,
     flatbuffers::Offset<flatbuffers::String> name = 0,
     flatbuffers::Offset<flatbuffers::String> password = 0,
-    uint32_t model = 0) {
+    uint32_t model = 0,
+    bool wants_host = false,
+    flatbuffers::Offset<flatbuffers::String> mod_version = 0) {
   HelloBuilder builder_(_fbb);
+  builder_.add_mod_version(mod_version);
   builder_.add_model(model);
   builder_.add_password(password);
   builder_.add_name(name);
   builder_.add_patch(patch);
   builder_.add_minor(minor);
   builder_.add_major(major);
+  builder_.add_wants_host(wants_host);
   return builder_.Finish();
 }
 
@@ -747,9 +850,12 @@ inline flatbuffers::Offset<Hello> CreateHelloDirect(
     uint32_t patch = 0,
     const char *name = nullptr,
     const char *password = nullptr,
-    uint32_t model = 0) {
+    uint32_t model = 0,
+    bool wants_host = false,
+    const char *mod_version = nullptr) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   auto password__ = password ? _fbb.CreateString(password) : 0;
+  auto mod_version__ = mod_version ? _fbb.CreateString(mod_version) : 0;
   return nier::CreateHello(
       _fbb,
       major,
@@ -757,7 +863,9 @@ inline flatbuffers::Offset<Hello> CreateHelloDirect(
       patch,
       name__,
       password__,
-      model);
+      model,
+      wants_host,
+      mod_version__);
 }
 
 struct Welcome FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -765,7 +873,8 @@ struct Welcome FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_GUID = 4,
     VT_ISMASTERCLIENT = 6,
-    VT_HIGHESTENTITYGUID = 8
+    VT_HIGHESTENTITYGUID = 8,
+    VT_SESSIONID = 10
   };
   uint64_t guid() const {
     return GetField<uint64_t>(VT_GUID, 0);
@@ -776,11 +885,15 @@ struct Welcome FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t highestEntityGuid() const {
     return GetField<uint32_t>(VT_HIGHESTENTITYGUID, 0);
   }
+  uint32_t sessionId() const {
+    return GetField<uint32_t>(VT_SESSIONID, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint64_t>(verifier, VT_GUID) &&
            VerifyField<uint8_t>(verifier, VT_ISMASTERCLIENT) &&
            VerifyField<uint32_t>(verifier, VT_HIGHESTENTITYGUID) &&
+           VerifyField<uint32_t>(verifier, VT_SESSIONID) &&
            verifier.EndTable();
   }
 };
@@ -798,6 +911,9 @@ struct WelcomeBuilder {
   void add_highestEntityGuid(uint32_t highestEntityGuid) {
     fbb_.AddElement<uint32_t>(Welcome::VT_HIGHESTENTITYGUID, highestEntityGuid, 0);
   }
+  void add_sessionId(uint32_t sessionId) {
+    fbb_.AddElement<uint32_t>(Welcome::VT_SESSIONID, sessionId, 0);
+  }
   explicit WelcomeBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -813,12 +929,77 @@ inline flatbuffers::Offset<Welcome> CreateWelcome(
     flatbuffers::FlatBufferBuilder &_fbb,
     uint64_t guid = 0,
     bool isMasterClient = false,
-    uint32_t highestEntityGuid = 0) {
+    uint32_t highestEntityGuid = 0,
+    uint32_t sessionId = 0) {
   WelcomeBuilder builder_(_fbb);
   builder_.add_guid(guid);
+  builder_.add_sessionId(sessionId);
   builder_.add_highestEntityGuid(highestEntityGuid);
   builder_.add_isMasterClient(isMasterClient);
   return builder_.Finish();
+}
+
+struct Reject FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef RejectBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_REASON = 4,
+    VT_DETAIL = 6
+  };
+  nier::RejectReason reason() const {
+    return static_cast<nier::RejectReason>(GetField<uint8_t>(VT_REASON, 0));
+  }
+  const flatbuffers::String *detail() const {
+    return GetPointer<const flatbuffers::String *>(VT_DETAIL);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_REASON) &&
+           VerifyOffset(verifier, VT_DETAIL) &&
+           verifier.VerifyString(detail()) &&
+           verifier.EndTable();
+  }
+};
+
+struct RejectBuilder {
+  typedef Reject Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_reason(nier::RejectReason reason) {
+    fbb_.AddElement<uint8_t>(Reject::VT_REASON, static_cast<uint8_t>(reason), 0);
+  }
+  void add_detail(flatbuffers::Offset<flatbuffers::String> detail) {
+    fbb_.AddOffset(Reject::VT_DETAIL, detail);
+  }
+  explicit RejectBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<Reject> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<Reject>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<Reject> CreateReject(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    nier::RejectReason reason = nier::RejectReason_Unknown,
+    flatbuffers::Offset<flatbuffers::String> detail = 0) {
+  RejectBuilder builder_(_fbb);
+  builder_.add_detail(detail);
+  builder_.add_reason(reason);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<Reject> CreateRejectDirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    nier::RejectReason reason = nier::RejectReason_Unknown,
+    const char *detail = nullptr) {
+  auto detail__ = detail ? _fbb.CreateString(detail) : 0;
+  return nier::CreateReject(
+      _fbb,
+      reason,
+      detail__);
 }
 
 struct EntityPacket FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -1090,7 +1271,8 @@ struct CreatePlayer FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_GUID = 4,
     VT_NAME = 6,
-    VT_MODEL = 8
+    VT_MODEL = 8,
+    VT_ISMASTERCLIENT = 10
   };
   uint64_t guid() const {
     return GetField<uint64_t>(VT_GUID, 0);
@@ -1101,12 +1283,16 @@ struct CreatePlayer FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t model() const {
     return GetField<uint32_t>(VT_MODEL, 0);
   }
+  bool isMasterClient() const {
+    return GetField<uint8_t>(VT_ISMASTERCLIENT, 0) != 0;
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint64_t>(verifier, VT_GUID) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
            VerifyField<uint32_t>(verifier, VT_MODEL) &&
+           VerifyField<uint8_t>(verifier, VT_ISMASTERCLIENT) &&
            verifier.EndTable();
   }
 };
@@ -1124,6 +1310,9 @@ struct CreatePlayerBuilder {
   void add_model(uint32_t model) {
     fbb_.AddElement<uint32_t>(CreatePlayer::VT_MODEL, model, 0);
   }
+  void add_isMasterClient(bool isMasterClient) {
+    fbb_.AddElement<uint8_t>(CreatePlayer::VT_ISMASTERCLIENT, static_cast<uint8_t>(isMasterClient), 0);
+  }
   explicit CreatePlayerBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1139,11 +1328,13 @@ inline flatbuffers::Offset<CreatePlayer> CreateCreatePlayer(
     flatbuffers::FlatBufferBuilder &_fbb,
     uint64_t guid = 0,
     flatbuffers::Offset<flatbuffers::String> name = 0,
-    uint32_t model = 0) {
+    uint32_t model = 0,
+    bool isMasterClient = false) {
   CreatePlayerBuilder builder_(_fbb);
   builder_.add_guid(guid);
   builder_.add_model(model);
   builder_.add_name(name);
+  builder_.add_isMasterClient(isMasterClient);
   return builder_.Finish();
 }
 
@@ -1151,13 +1342,15 @@ inline flatbuffers::Offset<CreatePlayer> CreateCreatePlayerDirect(
     flatbuffers::FlatBufferBuilder &_fbb,
     uint64_t guid = 0,
     const char *name = nullptr,
-    uint32_t model = 0) {
+    uint32_t model = 0,
+    bool isMasterClient = false) {
   auto name__ = name ? _fbb.CreateString(name) : 0;
   return nier::CreateCreatePlayer(
       _fbb,
       guid,
       name__,
-      model);
+      model,
+      isMasterClient);
 }
 
 }  // namespace nier

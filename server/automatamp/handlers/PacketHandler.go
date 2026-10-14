@@ -2,7 +2,7 @@ package handlers
 
 import (
 	"github.com/codecat/go-enet"
-	"github.com/codecat/go-libs/log"
+	core "github.com/praydog/AutomataMP/server/automatamp/core"
 	nier "github.com/praydog/AutomataMP/server/automatamp/nier"
 	structs "github.com/praydog/AutomataMP/server/automatamp/structs"
 )
@@ -14,13 +14,17 @@ func PacketHandler(server *structs.Server, connection *structs.Connection, sende
 	case nier.PacketTypeID_HELLO:
 		HandleHello(server, sender, connection, packetData)
 	case nier.PacketTypeID_PING:
-		HandlePing(sender, connection)
+		HandlePing(server, sender, connection)
+	case nier.PacketTypeID_PONG:
+		HandlePong(server, connection)
 	case nier.PacketTypeID_PLAYER_DATA:
 		HandlePlayerData(server, sender, connection, packetData)
 	case nier.PacketTypeID_ANIMATION_START:
 		HandleAnimationStart(server, sender, connection, packetData)
 	case nier.PacketTypeID_BUTTONS:
 		HandleButtons(server, sender, connection, packetData)
+	case nier.PacketTypeID_ENEMY_DIED:
+		HandleEnemyDied(server, sender, connection, packetData)
 	case nier.PacketTypeID_SPAWN_ENTITY:
 		HandleSpawnEntity(server, sender, connection, packetData)
 	case nier.PacketTypeID_DESTROY_ENTITY:
@@ -30,6 +34,6 @@ func PacketHandler(server *structs.Server, connection *structs.Connection, sende
 	case nier.PacketTypeID_ENTITY_ANIMATION_START:
 		HandleEntityAnimationStart(server, sender, connection, packetData)
 	default:
-		log.Error("Unknown packet type: %d", packetData.Id())
+		core.Problem(server, "Unknown packet type %d from %s", packetData.Id(), sender.GetAddress())
 	}
 }

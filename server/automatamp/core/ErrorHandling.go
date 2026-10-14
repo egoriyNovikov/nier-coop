@@ -10,6 +10,6 @@ func check(err error) {
 
 func handlepanic() {
 	if a := recover(); a != nil {
-		log.Info("RECOVER", a)
+		log.Error("Recovered from a panic: %v", a)
 	}
 }

@@ -17,13 +17,15 @@ const (
 	PacketTypeID_CREATE_PLAYER          PacketType = 2049
 	PacketTypeID_DESTROY_PLAYER         PacketType = 2050
 	PacketTypeID_SET_MASTER_CLIENT      PacketType = 2051
-	PacketTypeID_SERVER_END             PacketType = 2052
+	PacketTypeID_REJECT                 PacketType = 2052
+	PacketTypeID_SERVER_END             PacketType = 2053
 	PacketTypeID_CLIENT_START           PacketType = 4096
 	PacketTypeID_PLAYER_DATA            PacketType = 4097
 	PacketTypeID_ANIMATION_START        PacketType = 4098
 	PacketTypeID_CHANGE_PLAYER          PacketType = 4099
 	PacketTypeID_BUTTONS                PacketType = 4100
-	PacketTypeID_CLIENT_END             PacketType = 4101
+	PacketTypeID_ENEMY_DIED             PacketType = 4101
+	PacketTypeID_CLIENT_END             PacketType = 4102
 	PacketTypeID_PING                   PacketType = 32768
 	PacketTypeID_PONG                   PacketType = 32769
 	PacketTypeID_HELLO                  PacketType = 32770
@@ -41,12 +43,14 @@ var EnumNamesPacketType = map[PacketType]string{
 	PacketTypeID_CREATE_PLAYER:          "ID_CREATE_PLAYER",
 	PacketTypeID_DESTROY_PLAYER:         "ID_DESTROY_PLAYER",
 	PacketTypeID_SET_MASTER_CLIENT:      "ID_SET_MASTER_CLIENT",
+	PacketTypeID_REJECT:                 "ID_REJECT",
 	PacketTypeID_SERVER_END:             "ID_SERVER_END",
 	PacketTypeID_CLIENT_START:           "ID_CLIENT_START",
 	PacketTypeID_PLAYER_DATA:            "ID_PLAYER_DATA",
 	PacketTypeID_ANIMATION_START:        "ID_ANIMATION_START",
 	PacketTypeID_CHANGE_PLAYER:          "ID_CHANGE_PLAYER",
 	PacketTypeID_BUTTONS:                "ID_BUTTONS",
+	PacketTypeID_ENEMY_DIED:             "ID_ENEMY_DIED",
 	PacketTypeID_CLIENT_END:             "ID_CLIENT_END",
 	PacketTypeID_PING:                   "ID_PING",
 	PacketTypeID_PONG:                   "ID_PONG",
@@ -65,12 +69,14 @@ var EnumValuesPacketType = map[string]PacketType{
 	"ID_CREATE_PLAYER":          PacketTypeID_CREATE_PLAYER,
 	"ID_DESTROY_PLAYER":         PacketTypeID_DESTROY_PLAYER,
 	"ID_SET_MASTER_CLIENT":      PacketTypeID_SET_MASTER_CLIENT,
+	"ID_REJECT":                 PacketTypeID_REJECT,
 	"ID_SERVER_END":             PacketTypeID_SERVER_END,
 	"ID_CLIENT_START":           PacketTypeID_CLIENT_START,
 	"ID_PLAYER_DATA":            PacketTypeID_PLAYER_DATA,
 	"ID_ANIMATION_START":        PacketTypeID_ANIMATION_START,
 	"ID_CHANGE_PLAYER":          PacketTypeID_CHANGE_PLAYER,
 	"ID_BUTTONS":                PacketTypeID_BUTTONS,
+	"ID_ENEMY_DIED":             PacketTypeID_ENEMY_DIED,
 	"ID_CLIENT_END":             PacketTypeID_CLIENT_END,
 	"ID_PING":                   PacketTypeID_PING,
 	"ID_PONG":                   PacketTypeID_PONG,

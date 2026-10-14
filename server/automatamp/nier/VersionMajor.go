@@ -7,7 +7,7 @@ import "strconv"
 type VersionMajor uint32
 
 const (
-	VersionMajorValue VersionMajor = 1
+	VersionMajorValue VersionMajor = 3
 )
 
 var EnumNamesVersionMajor = map[VersionMajor]string{

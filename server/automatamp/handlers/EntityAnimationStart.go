@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"github.com/codecat/go-enet"
-	"github.com/codecat/go-libs/log"
 	flatbuffers "github.com/google/flatbuffers/go"
 	core "github.com/praydog/AutomataMP/server/automatamp/core"
 	nier "github.com/praydog/AutomataMP/server/automatamp/nier"
@@ -10,10 +9,8 @@ import (
 )
 
 func HandleEntityAnimationStart(server *structs.Server, sender enet.Peer, connection *structs.Connection, data *nier.Packet) {
-	log.Info("ENTITY Animation start received")
 
 	if !connection.Client.IsMasterClient {
-		log.Info(" Not a master client, ignoring")
 		return
 	}
 

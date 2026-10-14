@@ -16,7 +16,13 @@ public:
 
     const std::string& get_name() const { return m_name; }
 
-    void set_player_data(const nier::PlayerData& movement) { m_player_data = movement; }
+    void set_player_data(const nier::PlayerData& movement) {
+        m_player_data = movement;
+        m_has_player_data = true;
+    }
+
+    // At least one PlayerData packet arrived, the position in get_player_data() is real.
+    bool has_player_data() const { return m_has_player_data; }
 
     auto& get_player_data() { return m_player_data; }
 
@@ -37,6 +43,11 @@ public:
 
     void set_story_buddy(bool value) { m_is_story_buddy = value; }
 
+    // The player leading the story (master client on the server).
+    bool is_master_client() const { return m_is_master_client; }
+
+    void set_master_client(bool value) { m_is_master_client = value; }
+
     sdk::Pl0000* get_entity();
 
 private:
@@ -46,5 +57,7 @@ private:
     float m_start_tick{0.0f};
     uint32_t m_model{0};
     bool m_is_story_buddy{false};
+    bool m_is_master_client{false};
+    bool m_has_player_data{false};
     nier::PlayerData m_player_data;
 };

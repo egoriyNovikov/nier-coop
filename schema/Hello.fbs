@@ -1,7 +1,8 @@
 namespace nier;
 
+// Bump Major when old and new builds can't play together, the server rejects a different Major.
 enum VersionMajor : uint {
-    Value = 1
+    Value = 3
 }
 
 enum VersionMinor : uint {
@@ -19,6 +20,8 @@ table Hello {
     name: string;
     password: string;
     model: uint;
+    wants_host: bool; // The player leads the story: "Host Game" or the host role picked before "Join Game".
+    mod_version: string; // Mod version and git revision, for the logs.
 }
 
 root_type Hello;

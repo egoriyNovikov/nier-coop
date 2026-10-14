@@ -85,9 +85,9 @@ Entity* EntityList::get_by_handle(uint32_t handle) {
     return ent;
 }
 
-Entity* EntityList::get_possessed_entity() {
+uint32_t* get_current_handle_ptr() {
     //static uint32_t* currentHandle = Address(0x14158A6EC).as<uint32_t*>(); // old 2017
-    
+
     /*
     7FF710F48FBA - 0x57 Taura_TestRoom
     7FF710FA104F + 0x54 se_hacking_in
@@ -136,11 +136,28 @@ Entity* EntityList::get_possessed_entity() {
         return result;
     }();
 
-    if (!*current_handle) {
+    return current_handle;
+}
+
+Entity* EntityList::get_possessed_entity() {
+    const auto current_handle = get_current_handle_ptr();
+
+    if (current_handle == nullptr || !*current_handle) {
         return nullptr;
     }
 
     return get_by_handle(*current_handle);
+}
+
+bool EntityList::force_possessed_handle(uint32_t handle) {
+    const auto current_handle = get_current_handle_ptr();
+
+    if (current_handle == nullptr) {
+        return false;
+    }
+
+    *current_handle = handle;
+    return true;
 }
 
 std::tuple<EntityList::SpawnFunction, EntityList::SpawnThis> EntityList::get_spawn_entity_fn() {

@@ -24,7 +24,7 @@ NetworkEntity::NetworkEntity(sdk::Entity* entity, uint32_t guid)
 }
 
 void NetworkEntity::start_animation_hook(sdk::Behavior* behavior, uint32_t anim, uint32_t variant, uint32_t a3, uint32_t a4) {
-    spdlog::info("NETWORKENTITY anim: {}, variant: {}, a3: {}, return: {:x}", anim, variant, a3, (uintptr_t)_ReturnAddress());
+    spdlog::debug("NETWORKENTITY anim: {}, variant: {}, a3: {}, return: {:x}", anim, variant, a3, (uintptr_t)_ReturnAddress());
 
     auto amp = AutomataMPMod::get();
     auto& client = amp->get_client();

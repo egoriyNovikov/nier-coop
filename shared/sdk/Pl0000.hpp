@@ -36,8 +36,38 @@ public:
         return regenny()->buddy_handle;
     }
 
+    // Handle of the Flight Unit (pl0010, MODEL_FLIGHT_UNIT) the character owns, 0 if none.
+    // changePlayer reads it when the new player is 9S (base + 0x47629f).
+    __forceinline uint32_t& flight_unit_handle() {
+        return *(uint32_t*)((uintptr_t)this + 0x15b64);
+    }
+
     __forceinline regenny::CharacterController& character_controller() {
         return regenny()->controller;
+    }
+
+    // 1 for the character the player controls. The game's hero switch (base + 0x7c1fe0) sets it on the new
+    // hero and clears it on the old one. The Pl0000 update (base + 0x42f1d0) only runs the controller update
+    // (buttons, stick -> speed/facing, base + 0x500ee0) when it is set: the buddy moves by AI without it.
+    __forceinline uint32_t& is_player_controlled() {
+        return *(uint32_t*)((uintptr_t)this + 0x10b64);
+    }
+
+    // Bit 0: driven by AI. The hero switch sets it on the old hero and clears 0xd on the new one. The
+    // controller update is skipped while (control_flags & 0x41) != 0 (vfunc +0x348, base + 0x434f20).
+    __forceinline uint32_t& control_flags() {
+        return *(uint32_t*)((uintptr_t)this + 0x598);
+    }
+
+    // Input sources of the controller, the game reads only the enabled ones (base + 0x52a690, 0x52ac90):
+    // pad (+0x720, the physical gamepad), script (+0x724, data at +0x1c0), AI (+0x728, data at +0x3e8).
+    __forceinline uint32_t* controller_input_sources() {
+        return (uint32_t*)((uintptr_t)&character_controller() + 0x720);
+    }
+
+    // Stick magnitude squared, written next to speed by the stick update (base + 0x52ad27).
+    __forceinline float& speed_squared() {
+        return *(float*)((uintptr_t)&character_controller() + 0x798);
     }
 
     __forceinline float& facing2() {
