@@ -9,7 +9,31 @@ permissions:
 env:
   BUILD_TYPE: Release
 jobs:
+  server:
+    # Same runner and shell as build-server.yml: the cgo build of ENet fails on windows-2022 under bash.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build
+        working-directory: server
+        run: go build -o server.exe main.go
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-windows
+          path: ${{github.workspace}}/server/server.exe
+          if-no-files-found: error
+
   release:
+    needs: server
     # windows-latest ships only Visual Studio 2026, the project is built with VS 2022
     runs-on: windows-2022
     defaults:
@@ -35,22 +59,18 @@ jobs:
       - name: Build the mod
         run: cmake --build build --config $BUILD_TYPE --target automatamp
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
+      - name: Download the server
+        uses: actions/download-artifact@v7
         with:
-          go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
-
-      - name: Build the server
-        working-directory: server
-        run: go build -o server.exe main.go
+          name: server-windows
+          path: server-build
 
       - name: Package
         run: |
           dir="nier-coop-$GITHUB_REF_NAME"
           mkdir -p "$dir/automatamp_server"
           cp build/bin/automatamp/dinput8.dll "$dir/"
-          cp server/server.exe server/server.json "$dir/automatamp_server/"
+          cp server-build/server.exe server/server.json "$dir/automatamp_server/"
           cp .github/release/README.txt "$dir/"
           echo "$GITHUB_SHA" > "$dir/automatamp_revision.txt"
           7z a "$dir.zip" "$dir" > /dev/null
