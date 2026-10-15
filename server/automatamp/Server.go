@@ -61,6 +61,7 @@ func handleDisconnect(connection *structs.Connection, peer enet.Peer) {
 	if client != nil {
 		core.Event(currentServer, "Left: %s (guid %d), played %s", client.Name, client.Guid, time.Since(client.JoinedAt).Round(time.Second))
 
+		handlers.CloseClientLog(client)
 		handlers.HandleDestroyPlayer(currentServer, connection)
 		delete(currentServer.Clients, connection)
 
@@ -334,12 +335,18 @@ func CreateServer() {
 	currentServer.Config["masterServerNotify"] = true
 	currentServer.Config["name"] = "AutomataMP Server"
 	currentServer.Config["port"] = "6969"
+	currentServer.Config["clientLogs"] = "logs" // Copies of the players' logs, "" to not keep them.
 
 	json.Unmarshal(serverJson, &currentServer.Config)
 	if currentServer.Config["password"].(string) == "" {
 		log.Info("No password set, anyone can join")
 	} else {
 		log.Info("Password set")
+	}
+
+	if dir := handlers.ClientLogsDir(currentServer); dir != "" {
+		log.Info("Keeping copies of the players' logs in %s", dir)
+		handlers.DeleteOldClientLogs(currentServer)
 	}
 
 	Run()

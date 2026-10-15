@@ -25,6 +25,8 @@ func PacketHandler(server *structs.Server, connection *structs.Connection, sende
 		HandleButtons(server, sender, connection, packetData)
 	case nier.PacketTypeID_ENEMY_DIED:
 		HandleEnemyDied(server, sender, connection, packetData)
+	case nier.PacketTypeID_LOG_CHUNK:
+		HandleLogChunk(server, sender, connection, packetData)
 	case nier.PacketTypeID_SPAWN_ENTITY:
 		HandleSpawnEntity(server, sender, connection, packetData)
 	case nier.PacketTypeID_DESTROY_ENTITY:

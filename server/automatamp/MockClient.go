@@ -96,6 +96,12 @@ func (mock *MockClient) sendHelloAndWait(client enet.Host, peer enet.Peer) bool 
 
 			log.Info("Welcome: %d", welcome.Guid())
 			log.Info("Is master client: %t", welcome.IsMasterClient())
+			log.Info("Server keeps logs: %t", welcome.AcceptsLogs())
+
+			if welcome.AcceptsLogs() {
+				logLine := []byte("[mock] a line of the mock client's log\n")
+				peer.SendBytes(core.MakePacketBytes(nier.PacketTypeID_LOG_CHUNK, logLine), 0, enet.PacketFlagReliable)
+			}
 
 			return true
 		}

@@ -1,6 +1,7 @@
 package structs
 
 import (
+	"os"
 	"time"
 
 	nier "github.com/praydog/AutomataMP/server/automatamp/nier"
@@ -20,4 +21,9 @@ type Client struct {
 	PingSentAt  time.Time
 	PingPending bool
 	Rtt         time.Duration
+
+	// The server's copy of the player's log (ID_LOG_CHUNK), see handlers/LogChunk.go.
+	LogFile       *os.File
+	LogBytes      int64
+	LogCopyFailed bool
 }

@@ -72,7 +72,8 @@ enum PacketType : uint32_t {
   PacketType_ID_CHANGE_PLAYER = 4099,
   PacketType_ID_BUTTONS = 4100,
   PacketType_ID_ENEMY_DIED = 4101,
-  PacketType_ID_CLIENT_END = 4102,
+  PacketType_ID_LOG_CHUNK = 4102,
+  PacketType_ID_CLIENT_END = 4103,
   PacketType_ID_PING = 32768,
   PacketType_ID_PONG = 32769,
   PacketType_ID_HELLO = 32770,
@@ -81,7 +82,7 @@ enum PacketType : uint32_t {
   PacketType_MAX = PacketType_ID_WELCOME
 };
 
-inline const PacketType (&EnumValuesPacketType())[23] {
+inline const PacketType (&EnumValuesPacketType())[24] {
   static const PacketType values[] = {
     PacketType_ID_MASTER_CLIENT_START,
     PacketType_ID_SPAWN_ENTITY,
@@ -101,6 +102,7 @@ inline const PacketType (&EnumValuesPacketType())[23] {
     PacketType_ID_CHANGE_PLAYER,
     PacketType_ID_BUTTONS,
     PacketType_ID_ENEMY_DIED,
+    PacketType_ID_LOG_CHUNK,
     PacketType_ID_CLIENT_END,
     PacketType_ID_PING,
     PacketType_ID_PONG,
@@ -130,6 +132,7 @@ inline const char *EnumNamePacketType(PacketType e) {
     case PacketType_ID_CHANGE_PLAYER: return "ID_CHANGE_PLAYER";
     case PacketType_ID_BUTTONS: return "ID_BUTTONS";
     case PacketType_ID_ENEMY_DIED: return "ID_ENEMY_DIED";
+    case PacketType_ID_LOG_CHUNK: return "ID_LOG_CHUNK";
     case PacketType_ID_CLIENT_END: return "ID_CLIENT_END";
     case PacketType_ID_PING: return "ID_PING";
     case PacketType_ID_PONG: return "ID_PONG";
@@ -167,7 +170,7 @@ inline const char *EnumNameVersionMajor(VersionMajor e) {
 }
 
 enum VersionMinor : uint32_t {
-  VersionMinor_Value = 0,
+  VersionMinor_Value = 1,
   VersionMinor_MIN = VersionMinor_Value,
   VersionMinor_MAX = VersionMinor_Value
 };
@@ -189,7 +192,7 @@ inline const char * const *EnumNamesVersionMinor() {
 
 inline const char *EnumNameVersionMinor(VersionMinor e) {
   if (flatbuffers::IsOutRange(e, VersionMinor_Value, VersionMinor_Value)) return "";
-  const size_t index = static_cast<size_t>(e);
+  const size_t index = static_cast<size_t>(e) - static_cast<size_t>(VersionMinor_Value);
   return EnumNamesVersionMinor()[index];
 }
 
@@ -874,7 +877,8 @@ struct Welcome FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_GUID = 4,
     VT_ISMASTERCLIENT = 6,
     VT_HIGHESTENTITYGUID = 8,
-    VT_SESSIONID = 10
+    VT_SESSIONID = 10,
+    VT_ACCEPTSLOGS = 12
   };
   uint64_t guid() const {
     return GetField<uint64_t>(VT_GUID, 0);
@@ -888,12 +892,16 @@ struct Welcome FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t sessionId() const {
     return GetField<uint32_t>(VT_SESSIONID, 0);
   }
+  bool acceptsLogs() const {
+    return GetField<uint8_t>(VT_ACCEPTSLOGS, 0) != 0;
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint64_t>(verifier, VT_GUID) &&
            VerifyField<uint8_t>(verifier, VT_ISMASTERCLIENT) &&
            VerifyField<uint32_t>(verifier, VT_HIGHESTENTITYGUID) &&
            VerifyField<uint32_t>(verifier, VT_SESSIONID) &&
+           VerifyField<uint8_t>(verifier, VT_ACCEPTSLOGS) &&
            verifier.EndTable();
   }
 };
@@ -914,6 +922,9 @@ struct WelcomeBuilder {
   void add_sessionId(uint32_t sessionId) {
     fbb_.AddElement<uint32_t>(Welcome::VT_SESSIONID, sessionId, 0);
   }
+  void add_acceptsLogs(bool acceptsLogs) {
+    fbb_.AddElement<uint8_t>(Welcome::VT_ACCEPTSLOGS, static_cast<uint8_t>(acceptsLogs), 0);
+  }
   explicit WelcomeBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -930,11 +941,13 @@ inline flatbuffers::Offset<Welcome> CreateWelcome(
     uint64_t guid = 0,
     bool isMasterClient = false,
     uint32_t highestEntityGuid = 0,
-    uint32_t sessionId = 0) {
+    uint32_t sessionId = 0,
+    bool acceptsLogs = false) {
   WelcomeBuilder builder_(_fbb);
   builder_.add_guid(guid);
   builder_.add_sessionId(sessionId);
   builder_.add_highestEntityGuid(highestEntityGuid);
+  builder_.add_acceptsLogs(acceptsLogs);
   builder_.add_isMasterClient(isMasterClient);
   return builder_.Finish();
 }

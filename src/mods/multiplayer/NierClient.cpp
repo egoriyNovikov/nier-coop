@@ -6,6 +6,8 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
+#include <share.h>
+
 #include <sdk/CameraGame.hpp>
 #include <sdk/Enums.hpp>
 
@@ -101,6 +103,10 @@ NierClient::NierClient(const std::string& host, const std::string& port, const s
 NierClient::~NierClient() {
     std::scoped_lock _{m_mtx};
     disconnect();
+
+    if (m_log_copy_file != nullptr) {
+        fclose(m_log_copy_file);
+    }
 }
 
 void NierClient::pump() {
@@ -399,6 +405,8 @@ void NierClient::think() {
     if (!m_welcome_received) {
         return;
     }
+
+    send_log_copy();
 
     // Joined while not in the world, or came back from a loading screen:
     // let the others know about the enemies around us.
@@ -796,6 +804,46 @@ void NierClient::send_packet(nier::PacketType id, const uint8_t* data, size_t si
     this->enetpp::client::send_packet(0, builder.GetBufferPointer(), builder.GetSize(), ENET_PACKET_FLAG_RELIABLE);
 }
 
+void NierClient::send_log_copy() {
+    if (!m_server_accepts_logs) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    if (now < m_next_log_copy) {
+        return;
+    }
+
+    m_next_log_copy = now + std::chrono::seconds(1);
+
+    if (m_log_copy_file == nullptr) {
+        const auto& sinks = spdlog::default_logger()->sinks();
+        const auto file_sink = !sinks.empty() ? std::dynamic_pointer_cast<spdlog::sinks::basic_file_sink_mt>(sinks[0]) : nullptr;
+
+        // Shared read: spdlog keeps writing the file.
+        if (file_sink == nullptr || (m_log_copy_file = _fsopen(file_sink->filename().c_str(), "rb", _SH_DENYNO)) == nullptr) {
+            m_server_accepts_logs = false;
+            spdlog::error("[Coop] Can't read our own log, the server won't get a copy of it");
+            return;
+        }
+    }
+
+    // At most 64 KB a second: the log since the game started is sent over the first seconds.
+    std::array<uint8_t, 16 * 1024> buffer{};
+
+    for (auto i = 0; i < 4; ++i) {
+        clearerr(m_log_copy_file);
+        const auto size = fread(buffer.data(), 1, buffer.size(), m_log_copy_file);
+
+        if (size == 0) {
+            break;
+        }
+
+        send_packet(nier::PacketType_ID_LOG_CHUNK, buffer.data(), size);
+    }
+}
+
 void NierClient::send_animation_start(uint32_t anim, uint32_t variant, uint32_t a3, uint32_t a4) {
     nier::AnimationStart data{anim, variant, a3, a4};
 
@@ -1094,10 +1142,15 @@ bool NierClient::handle_welcome(const nier::Packet* packet) {
     m_is_master_client = welcome->isMasterClient();
     m_guid = welcome->guid();
     m_session_id = welcome->sessionId();
+    m_server_accepts_logs = welcome->acceptsLogs();
     const auto highest_guid = welcome->highestEntityGuid();
 
     spdlog::info("[Coop] Joined session {}: guid {}, {}", m_session_id, m_guid,
         m_is_master_client ? "we lead the story" : "the host leads the story");
+
+    if (m_server_accepts_logs) {
+        spdlog::info("[Coop] The server keeps a copy of this log");
+    }
 
     m_network_entities = std::make_unique<EntitySync>(highest_guid);
 

@@ -28,6 +28,8 @@ echo ">> Building and restarting"
     go build -o /opt/nier-coop/server.new main.go
     install -m 755 /opt/nier-coop/server.new /opt/nier-coop/server
     rm -f /opt/nier-coop/server.new
+    # Copies of the player logs (clientLogs in server.json), the service runs as nier.
+    install -d -o nier -g nier -m 750 /opt/nier-coop/logs
     systemctl restart nier-coop
     sleep 2
     systemctl --no-pager --lines=15 status nier-coop

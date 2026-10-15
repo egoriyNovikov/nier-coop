@@ -5,6 +5,7 @@ table Welcome {
     isMasterClient: bool;
     highestEntityGuid: uint;
     sessionId: uint; // Same number in the server log and in the logs of both players.
+    acceptsLogs: bool; // The server keeps a copy of the players' logs (ID_LOG_CHUNK).
 }
 
 root_type Welcome;

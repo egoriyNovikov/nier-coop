@@ -81,8 +81,20 @@ func (rcv *Welcome) MutateSessionId(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(10, n)
 }
 
+func (rcv *Welcome) AcceptsLogs() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *Welcome) MutateAcceptsLogs(n bool) bool {
+	return rcv._tab.MutateBoolSlot(12, n)
+}
+
 func WelcomeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func WelcomeAddGuid(builder *flatbuffers.Builder, guid uint64) {
 	builder.PrependUint64Slot(0, guid, 0)
@@ -95,6 +107,9 @@ func WelcomeAddHighestEntityGuid(builder *flatbuffers.Builder, highestEntityGuid
 }
 func WelcomeAddSessionId(builder *flatbuffers.Builder, sessionId uint32) {
 	builder.PrependUint32Slot(3, sessionId, 0)
+}
+func WelcomeAddAcceptsLogs(builder *flatbuffers.Builder, acceptsLogs bool) {
+	builder.PrependBoolSlot(4, acceptsLogs, false)
 }
 func WelcomeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

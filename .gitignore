@@ -61,3 +61,6 @@ server_log.txt
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Copies of player logs kept by a locally started server
+server/logs/

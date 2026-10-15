@@ -126,6 +126,7 @@ func HandleHello(server *structs.Server, sender enet.Peer, connection *structs.C
 		nier.WelcomeAddIsMasterClient(builder, client.IsMasterClient)
 		nier.WelcomeAddHighestEntityGuid(builder, server.HighestEntityGuid)
 		nier.WelcomeAddSessionId(builder, server.SessionId)
+		nier.WelcomeAddAcceptsLogs(builder, ClientLogsDir(server) != "")
 		return nier.WelcomeEnd(builder)
 	})
 

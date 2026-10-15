@@ -28,6 +28,7 @@ enum PacketType : uint {
     ID_CHANGE_PLAYER,
     ID_BUTTONS,
     ID_ENEMY_DIED, // An enemy of the sender's own story died (EnemyDied).
+    ID_LOG_CHUNK, // Lines of the sender's log file as raw text, the server stores them and does not forward.
     ID_CLIENT_END,
 
     ID_PING = 32768,

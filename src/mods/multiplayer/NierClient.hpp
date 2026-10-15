@@ -135,6 +135,8 @@ private:
     bool handle_enemy_died(const nier::PlayerPacket* packet);
 
     void send_enemy_died(const EnemyDeathSync::Death& death);
+    // Sends what was added to our log file since the last call, when the server keeps a copy of it.
+    void send_log_copy();
     // Game thread. Tracks our enemies, sends their deaths, applies the deaths from the other game.
     void sync_enemy_deaths(bool connected);
 
@@ -226,6 +228,11 @@ private:
     std::string m_reject_reason{};
     bool m_version_rejected{false};
     uint32_t m_session_id{0};
+
+    // The server's copy of our log (Welcome.acceptsLogs): our log file read from the start of the game.
+    bool m_server_accepts_logs{false};
+    FILE* m_log_copy_file{nullptr};
+    std::chrono::steady_clock::time_point m_next_log_copy{};
 
     bool m_welcome_received{ false };
     bool m_hello_sent{ false };

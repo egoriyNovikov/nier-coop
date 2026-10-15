@@ -3,5 +3,6 @@
     "masterServer": "https://niermaster.praydog.com",
     "masterServerNotify": false,
     "name": "AutomataMP Server",
-    "port": "6969"
+    "port": "6969",
+    "clientLogs": "logs"
 }
