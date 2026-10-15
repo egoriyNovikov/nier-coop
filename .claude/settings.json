@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Content *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Get-Item *)",
+      "PowerShell(Select-Object *)",
+      "PowerShell(Where-Object *)",
+      "PowerShell(Sort-Object *)",
+      "PowerShell(Format-Table *)",
+      "PowerShell(Measure-Object *)",
+      "Bash(tasklist *)",
+      "mcp__claude-in-chrome__read_console_messages",
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "mcp__claude-in-chrome__read_network_requests"
+    ]
+  }
+}
