@@ -10,27 +10,8 @@ env:
   BUILD_TYPE: Release
 jobs:
   server:
-    # Same runner and shell as build-server.yml: the cgo build of ENet fails on windows-2022 under bash.
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
-
-      - name: Build
-        working-directory: server
-        run: go build -o server.exe main.go
-
-      - name: Upload
-        uses: actions/upload-artifact@v7
-        with:
-          name: server-windows
-          path: ${{github.workspace}}/server/server.exe
-          if-no-files-found: error
+    # The same build as on every push (CI is green there), the release takes its Windows server.
+    uses: ./.github/workflows/build-server.yml
 
   release:
     needs: server
@@ -62,7 +43,7 @@ jobs:
       - name: Download the server
         uses: actions/download-artifact@v7
         with:
-          name: server-windows
+          name: server-Windows
           path: server-build
 
       - name: Package
