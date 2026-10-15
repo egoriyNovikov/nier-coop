@@ -151,6 +151,12 @@ private:
     void update_puppet_inputs();
     // Game thread only. Moves each puppet a bit towards the last network position of its player.
     void smooth_puppet_positions();
+    // Game thread only. Stops the puppets whose player sent no data for a while (frozen game, lost connection).
+    void stop_stale_puppets();
+    // Game thread only. Logs jumps of our own character and puts it back if its position became NaN.
+    void watch_local_character();
+    // The character we control right now, never driven as a puppet.
+    bool is_local_character(const sdk::Pl0000* npc) const;
     void log_animation_stats();
 
     std::unique_ptr<EntitySync> m_network_entities{};
@@ -203,6 +209,14 @@ private:
     float m_stat_position_error_max{0.0f};
     uint32_t m_stat_position_samples{0};
     uint32_t m_stat_position_snaps{0};
+    uint32_t m_stat_bad_player_data{0};
+
+    // watch_local_character: our character in the previous think.
+    uint32_t m_watched_handle{0};
+    Vector3f m_watched_position{};
+    std::chrono::steady_clock::time_point m_next_jump_log{};
+    uint32_t m_jumps_not_logged{0};
+    std::chrono::steady_clock::time_point m_next_nan_log{};
 
     std::recursive_mutex m_mtx{};
     std::recursive_mutex m_players_mutex{};

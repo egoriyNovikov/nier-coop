@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "schema/Packets_generated.h"
 
 namespace sdk {
@@ -19,7 +21,21 @@ public:
     void set_player_data(const nier::PlayerData& movement) {
         m_player_data = movement;
         m_has_player_data = true;
+        m_last_data_time = std::chrono::steady_clock::now();
     }
+
+    // Keeps the last position and facing, but no speed and no buttons: the puppet stands still.
+    void stop_movement() {
+        const auto& d = m_player_data;
+        m_player_data = nier::PlayerData{d.flashlight(), 0.0f, d.facing(), d.facing2(), d.weapon_index(), d.pod_index(), 0, d.position()};
+    }
+
+    std::chrono::steady_clock::time_point get_last_data_time() const { return m_last_data_time; }
+
+    // No player data for a while, the puppet was stopped (NierClient::stop_stale_puppets).
+    bool is_data_stale() const { return m_data_stale; }
+
+    void set_data_stale(bool value) { m_data_stale = value; }
 
     // At least one PlayerData packet arrived, the position in get_player_data() is real.
     bool has_player_data() const { return m_has_player_data; }
@@ -59,5 +75,7 @@ private:
     bool m_is_story_buddy{false};
     bool m_is_master_client{false};
     bool m_has_player_data{false};
+    bool m_data_stale{false};
+    std::chrono::steady_clock::time_point m_last_data_time{};
     nier::PlayerData m_player_data;
 };

@@ -41,6 +41,10 @@ uint32_t get_counterpart_model(uint32_t model) {
     }
 }
 
+bool is_finite(const Vector3f& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
 bool is_character_model(uint32_t model) {
     return model == sdk::EModel::MODEL_2B || model == sdk::EModel::MODEL_9S || model == sdk::EModel::MODEL_A2;
 }
@@ -156,6 +160,7 @@ void NierClient::on_world_unloaded() {
         m_puppet_inputs.clear();
     }
 
+    m_watched_handle = 0;
     m_swap_done = false;
     m_swap_pending = false;
     m_swap_checked_handle = 0;
@@ -432,7 +437,9 @@ void NierClient::think() {
 
     if (m_players.contains(m_guid)) {
         update_local_player_data();
+        watch_local_character();
         send_player_data();
+        stop_stale_puppets();
 
         // Synchronize the players.
         for (auto& it : m_players) {
@@ -445,8 +452,8 @@ void NierClient::think() {
 
             auto npc = networked_player->get_entity();
 
-            // Not bound yet, sync_puppets will retry.
-            if (npc == nullptr) {
+            // Not bound yet, sync_puppets will retry. Never drive our own character with the other player's data.
+            if (npc == nullptr || is_local_character(npc)) {
                 continue;
             }
 
@@ -1058,7 +1065,8 @@ void NierClient::send_player_data() {
     auto entity = player->get_entity();
 
     // Not controlling a character right now, see update_local_player_data.
-    if (entity == nullptr) {
+    // A NaN position would break the puppet in the other game (test 2026-10-14), see watch_local_character.
+    if (entity == nullptr || !is_finite(entity->position())) {
         return;
     }
 
@@ -1381,6 +1389,17 @@ void NierClient::sync_puppets() {
         }
 
         if (auto npc = player->get_entity(); npc != nullptr) {
+            // The game made the puppet our character (story switch, a late changePlayer): it is ours now,
+            // the other player's data must not move it. Its flags are the game's, nothing to restore.
+            if (possessed != nullptr && possessed->behavior == npc) {
+                spdlog::warn("[Coop] The puppet of {} ({:x}) is the character we control now, unbinding it",
+                    player->get_name(), npc->model_index());
+                player->set_handle(0);
+                player->set_story_buddy(false);
+                m_next_bind_attempt[guid] = now + std::chrono::seconds(2);
+                continue;
+            }
+
             if (!player->is_story_buddy()) {
                 continue;
             }
@@ -1712,8 +1731,23 @@ bool NierClient::handle_player_data(const nier::PlayerPacket* packet) {
     }
 
     auto player_data = flatbuffers::GetRoot<nier::PlayerData>(packet->data()->data());
+
+    // Older builds sent NaN when the character's position broke (test 2026-10-14): keep the last good data.
+    if (!is_finite(*(Vector3f*)&player_data->position()) || !std::isfinite(player_data->speed()) ||
+        !std::isfinite(player_data->facing()) || !std::isfinite(player_data->facing2())) {
+        if (m_stat_bad_player_data++ == 0) {
+            spdlog::warn("[Coop] {} sent a position that is not a number, ignoring it", player_networked->get_name());
+        }
+
+        return false;
+    }
+
     // Outside the game thread we only keep the data, the next think() applies it.
     auto npc = can_touch_entities() ? player_networked->get_entity() : nullptr;
+
+    if (npc != nullptr && is_local_character(npc)) {
+        npc = nullptr;
+    }
 
     // With smoothing, think() moves the puppet towards this position over the next frames. Snapping
     // here fought the puppet's own run animation: it ran ahead, got pulled back on every packet.
@@ -1933,7 +1967,7 @@ void NierClient::smooth_puppet_positions() {
 
         auto npc = player->get_entity();
 
-        if (npc == nullptr) {
+        if (npc == nullptr || is_local_character(npc)) {
             continue;
         }
 
@@ -1949,13 +1983,116 @@ void NierClient::smooth_puppet_positions() {
         m_stat_position_error_max = std::max(m_stat_position_error_max, distance);
         ++m_stat_position_samples;
 
-        if (distance > snap_distance) {
+        // A NaN position never comes back by itself, the distance is NaN too.
+        if (distance > snap_distance || !std::isfinite(distance)) {
             position = target;
             ++m_stat_position_snaps;
         } else if (distance > dead_zone) {
             position += error * blend;
         }
     }
+}
+
+bool NierClient::is_local_character(const sdk::Pl0000* npc) const {
+    auto entity_list = sdk::EntityList::get();
+    auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    return npc != nullptr && possessed != nullptr && possessed->behavior == npc;
+}
+
+void NierClient::stop_stale_puppets() {
+    // Data comes 60 times a second. Without it the puppet would keep the last speed and buttons and run
+    // on (test 2026-10-14: the other game froze, 9S ran into a wall for a minute).
+    constexpr auto stale_after = std::chrono::milliseconds(1000);
+
+    const auto now = std::chrono::steady_clock::now();
+
+    for (auto& [guid, player] : m_players) {
+        if (player == nullptr || guid == m_guid || !player->has_player_data()) {
+            continue;
+        }
+
+        const auto stale = now - player->get_last_data_time() > stale_after;
+
+        if (stale && !player->is_data_stale()) {
+            spdlog::warn("[Coop] No data from {} for {} ms, stopping their character", player->get_name(),
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - player->get_last_data_time()).count());
+            player->set_data_stale(true);
+            player->stop_movement();
+        } else if (!stale && player->is_data_stale()) {
+            spdlog::info("[Coop] Data from {} again", player->get_name());
+            player->set_data_stale(false);
+        }
+    }
+}
+
+void NierClient::watch_local_character() {
+    auto it = m_players.find(m_guid);
+    auto entity = it != m_players.end() && it->second != nullptr ? it->second->get_entity() : nullptr;
+
+    if (entity == nullptr) {
+        m_watched_handle = 0;
+        return;
+    }
+
+    const auto handle = it->second->get_handle();
+    auto& position = entity->position();
+    const auto now = std::chrono::steady_clock::now();
+
+    // Test 2026-10-14: the client's 9S got a NaN position while 9S was talking, the game looked frozen.
+    // Put the character back where it last was.
+    if (!is_finite(position)) {
+        const auto can_restore = handle == m_watched_handle;
+
+        if (now >= m_next_nan_log) {
+            m_next_nan_log = now + std::chrono::seconds(1);
+            spdlog::error("[Coop] Our character {:x} has a position that is not a number, {}", entity->model_index(),
+                can_restore ? fmt::format("putting it back to ({:.1f} {:.1f} {:.1f})", m_watched_position.x,
+                    m_watched_position.y, m_watched_position.z) : std::string{"no earlier position to put it back to"});
+        }
+
+        if (can_restore) {
+            position = m_watched_position;
+        }
+
+        return;
+    }
+
+    // Test 2026-10-14: the client's character was pulled towards the host while standing still. Logs
+    // every jump of our character, and where the other player's puppet is at that moment.
+    constexpr float jump_distance = 3.0f;
+
+    if (handle == m_watched_handle) {
+        const auto jump = glm::length(position - m_watched_position);
+
+        if (jump > jump_distance) {
+            if (now >= m_next_jump_log) {
+                m_next_jump_log = now + std::chrono::seconds(1);
+
+                std::string puppets{};
+
+                for (auto& [guid, player] : m_players) {
+                    auto npc = player != nullptr && guid != m_guid ? player->get_entity() : nullptr;
+
+                    if (npc != nullptr) {
+                        puppets += fmt::format("; puppet of {} at ({:.1f} {:.1f} {:.1f}), {:.1f} m away", player->get_name(),
+                            npc->position().x, npc->position().y, npc->position().z, glm::length(npc->position() - position));
+                    }
+                }
+
+                spdlog::info("[Coop] Our character {:x} jumped {:.1f} m in one frame: ({:.1f} {:.1f} {:.1f}) -> ({:.1f} {:.1f} {:.1f}){}{}",
+                    entity->model_index(), jump, m_watched_position.x, m_watched_position.y, m_watched_position.z,
+                    position.x, position.y, position.z, puppets,
+                    m_jumps_not_logged > 0 ? fmt::format(" ({} more jumps since the last line)", m_jumps_not_logged) : std::string{});
+                m_jumps_not_logged = 0;
+            } else {
+                ++m_jumps_not_logged;
+            }
+        }
+    }
+
+    m_watched_handle = handle;
+    m_watched_position = position;
 }
 
 void NierClient::make_puppet_player_controlled(sdk::Pl0000* npc, PuppetInput& input) {
@@ -2099,6 +2236,7 @@ void NierClient::log_animation_stats() {
     const auto position_error_sum = std::exchange(m_stat_position_error_sum, 0.0f);
     const auto position_error_max = std::exchange(m_stat_position_error_max, 0.0f);
     const auto position_snaps = std::exchange(m_stat_position_snaps, 0);
+    const auto bad_player_data = std::exchange(m_stat_bad_player_data, 0);
 
     if (anims_sent + anims_received + buttons_sent + buttons_received + hook_frames + position_samples == 0) {
         return;
@@ -2112,8 +2250,8 @@ void NierClient::log_animation_stats() {
 
     spdlog::info("[Anim] 10 s: sent anims {} buttons {}; received anims {} (applied {}) buttons {}; "
                  "puppets {}, puppet updates {}, button frames applied {} dropped {}; "
-                 "position error avg {:.2f} m max {:.2f} m, snaps {}",
+                 "position error avg {:.2f} m max {:.2f} m, snaps {}, NaN packets {}",
         anims_sent, buttons_sent, anims_received, anims_applied, buttons_received, puppets, hook_frames, frames_applied,
         frames_dropped, position_samples > 0 ? position_error_sum / position_samples : 0.0f, position_error_max,
-        position_snaps);
+        position_snaps, bad_player_data);
 }
