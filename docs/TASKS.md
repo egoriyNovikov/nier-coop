@@ -119,7 +119,7 @@
 ### Веха 3: открытый тест — `[ ]`
 Цель: другие люди могут поставить мод, подключиться и прислать полезный отчёт без помощи автора.
 
-- [ ] 8.3 Сборка DLL и сервера в GitHub Releases (перенесено из этапа 8). CI уже собирает обе части на каждый push (вкладка Actions), осталось публиковать в Releases по тегу
+- [?] 8.3 Сборка DLL и сервера в GitHub Releases. Сделано 2026-10-15: `.github/workflows/release.yml` на тег `vX.Y.Z` (должен совпадать с `AUTOMATAMP_VERSION`) собирает DLL и `server.exe`, кладёт в архив `nier-coop-vX.Y.Z.zip` (`dinput8.dll`, `automatamp_server\`, `README.txt`) и публикует pre-release; текст релиза — `docs/release-notes/vX.Y.Z.md`. Выпуск версии: поднять версию, написать заметки, закоммитить, `git tag vX.Y.Z && git push origin vX.Y.Z`
 - [ ] 0.5.1 `docs/TESTING.md`
 - [ ] 0.8.1 Раздел для тестеров в `docs/TESTING.md`: установка, подключение, роли, что проверять, что прислать
 - [ ] 0.8.2 Шаблон бага в GitHub Issues
