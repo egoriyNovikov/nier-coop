@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include <d3d11.h>
+#include <TlHelp32.h>
 #include <wrl.h>
 #include <spdlog/spdlog.h>
 
@@ -44,6 +45,22 @@ const std::unordered_map<std::string, WORD> BUTTONS{
 // Triggers are axes in XInput; kept in the high bits of g_buttons, which XInput doesn't use for buttons.
 constexpr WORD LT = 0x0400;
 constexpr WORD RT = 0x0800;
+
+// Writes caught by the watch command, filled by the exception handler on the writing thread.
+struct Hit {
+    uint32_t slot;
+    uintptr_t rip;
+    uintptr_t stack[12];
+    uintptr_t args[4]; // rcx, rdx, r8, r9 of an execute breakpoint (the function's first arguments)
+    char value[48];    // write: the watched bytes after the write; execute: the string rdx points to
+};
+
+constexpr size_t MAX_HITS = 2048;
+Hit g_hits[MAX_HITS]{};
+std::atomic<size_t> g_hit_count{0};
+std::atomic<size_t> g_hits_dropped{0};
+uintptr_t g_watch_address[4]{};
+bool g_watch_execute[4]{};
 }
 
 std::optional<std::string> TestBot::on_initialize() {
@@ -137,6 +154,11 @@ void TestBot::tick() {
 
     if (++m_frame % 25 == 0) {
         read_commands();
+    }
+
+    // Threads started after the watch command (loading workers) get the breakpoints too.
+    if (m_frame % 100 == 0 && !m_watches.empty()) {
+        arm_threads();
     }
 
     if (!m_busy && !m_queue.empty()) {
@@ -262,6 +284,14 @@ void TestBot::start(const Command& command) {
             list_candidates(command.arg1.empty() ? 30 : std::stoul(command.arg1));
         } else if (command.verb == "xref") {
             find_xrefs(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 0 : std::stoull(command.arg2, nullptr, 16));
+        } else if (command.verb == "watch") {
+            if (command.arg1 == "off") {
+                clear_watches();
+            } else {
+                add_watch(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 8 : command.arg2 == "x" ? 0 : std::stoul(command.arg2));
+            }
+        } else if (command.verb == "hits") {
+            list_hits();
         } else if (command.verb == "scan") {
             scan_strings(command.text.substr(command.text.find(' ') + 1));
         } else {
@@ -282,6 +312,7 @@ std::string TestBot::describe_state() {
     s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id();
     const auto story = StoryWatcher::get().current();
     s << " event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.event << std::dec;
+    s << " route=" << (story.route != 0 ? std::string{story.route} : "none") << " hero=" << (story.character.empty() ? "none" : story.character);
     s << " events=" << story.events << " last_event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.last_event << std::dec;
 
     if (!sdk::is_loading()) {
@@ -503,6 +534,228 @@ void TestBot::list_candidates(size_t count) {
     }
 
     finish("ok cands (" + std::to_string(m_candidates.size()) + ")");
+}
+
+// Research helper: hardware write breakpoints (debug registers DR0-DR3) on exe memory in every thread of the
+// game. The exception handler records the writing instruction, the call stack unwound through the exe's
+// .pdata and the bytes after the write; `hits` prints them. Finds who writes a global (e.g. the story phase).
+void TestBot::add_watch(uintptr_t rva, uint32_t length) {
+    if (m_watches.size() >= 4) {
+        finish("error watch: 4 watches already (watch off clears them)");
+        return;
+    }
+
+    if (length != 0 && length != 1 && length != 2 && length != 4 && length != 8) {
+        finish("error watch: length must be 1, 2, 4, 8 or x");
+        return;
+    }
+
+    const auto address = (uintptr_t)GetModuleHandleW(nullptr) + rva;
+
+    if (length != 0 && address % length != 0) {
+        finish("error watch: the address must be aligned to the length");
+        return;
+    }
+
+    if (m_exception_handler == nullptr) {
+        m_exception_handler = AddVectoredExceptionHandler(1, &TestBot::on_exception);
+    }
+
+    g_watch_address[m_watches.size()] = address;
+    g_watch_execute[m_watches.size()] = length == 0;
+    m_watches.push_back({address, length});
+    arm_threads();
+    finish("ok " + m_current + " (" + std::to_string(m_armed_threads.size()) + " threads)");
+}
+
+void TestBot::clear_watches() {
+    m_watches.clear();
+    m_armed_threads.clear();
+    arm_threads(); // writes empty debug registers
+    m_armed_threads.clear();
+    finish("ok watch off");
+}
+
+void TestBot::arm_threads() {
+    const auto snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    THREADENTRY32 entry{sizeof(entry)};
+    const auto pid = GetCurrentProcessId();
+    const auto self = GetCurrentThreadId();
+
+    for (auto ok = Thread32First(snapshot, &entry); ok; ok = Thread32Next(snapshot, &entry)) {
+        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) {
+            continue;
+        }
+
+        const auto armed = m_armed_threads.find(entry.th32ThreadID);
+
+        if (armed != m_armed_threads.end() && armed->second == m_watches.size()) {
+            continue;
+        }
+
+        const auto thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+
+        if (thread == nullptr) {
+            continue;
+        }
+
+        if (SuspendThread(thread) != (DWORD)-1) {
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+
+            if (GetThreadContext(thread, &context)) {
+                DWORD64* registers[4]{&context.Dr0, &context.Dr1, &context.Dr2, &context.Dr3};
+                context.Dr7 = 0;
+
+                for (size_t i = 0; i < 4; ++i) {
+                    *registers[i] = i < m_watches.size() ? m_watches[i].address : 0;
+
+                    if (i < m_watches.size() && m_watches[i].length == 0) {
+                        context.Dr7 |= 1ull << (i * 2); // RW 00, LEN 00: break on execution
+                    } else if (i < m_watches.size()) {
+                        // LEN encoding: 1 -> 00, 2 -> 01, 8 -> 10, 4 -> 11; RW 01 = break on data writes.
+                        const auto length = m_watches[i].length;
+                        const DWORD64 len = length == 1 ? 0 : length == 2 ? 1 : length == 8 ? 2 : 3;
+                        context.Dr7 |= (1ull << (i * 2)) | (1ull << (16 + i * 4)) | (len << (18 + i * 4));
+                    }
+                }
+
+                if (SetThreadContext(thread, &context)) {
+                    m_armed_threads[entry.th32ThreadID] = m_watches.size();
+                }
+            }
+
+            ResumeThread(thread);
+        }
+
+        CloseHandle(thread);
+    }
+
+    CloseHandle(snapshot);
+}
+
+LONG WINAPI TestBot::on_exception(EXCEPTION_POINTERS* info) {
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const auto dr6 = info->ContextRecord->Dr6;
+
+    if ((dr6 & 0xF) == 0) {
+        return EXCEPTION_CONTINUE_SEARCH; // a single step of someone else (a debugger)
+    }
+
+    const auto slot = (uint32_t)((dr6 & 1) ? 0 : (dr6 & 2) ? 1 : (dr6 & 4) ? 2 : 3);
+    const auto index = g_hit_count.fetch_add(1);
+
+    if (index < MAX_HITS) {
+        auto& hit = g_hits[index];
+        hit = {};
+        hit.slot = slot;
+        hit.rip = info->ContextRecord->Rip;
+
+        // Unwind from the writing instruction (data breakpoints trap after it, so Rip is the next one).
+        auto context = *info->ContextRecord;
+
+        for (auto& frame : hit.stack) {
+            DWORD64 image_base{};
+            const auto function = RtlLookupFunctionEntry(context.Rip, &image_base, nullptr);
+
+            if (function == nullptr) {
+                context.Rip = *(DWORD64*)context.Rsp; // leaf function
+                context.Rsp += 8;
+            } else {
+                void* handler_data{};
+                DWORD64 establisher{};
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, context.Rip, function, &context, &handler_data, &establisher, nullptr);
+            }
+
+            if (context.Rip == 0) {
+                break;
+            }
+
+            frame = context.Rip;
+        }
+
+        if (g_watch_execute[slot]) {
+            const auto& c = *info->ContextRecord;
+            hit.args[0] = c.Rcx;
+            hit.args[1] = c.Rdx;
+            hit.args[2] = c.R8;
+            hit.args[3] = c.R9;
+            MEMORY_BASIC_INFORMATION mbi{};
+
+            if (VirtualQuery((const void*)c.Rdx, &mbi, sizeof(mbi)) != 0 && mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)) != 0 &&
+                c.Rdx + sizeof(hit.value) <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
+                memcpy(hit.value, (const void*)c.Rdx, sizeof(hit.value) - 1);
+            }
+        } else {
+            memcpy(hit.value, (const void*)g_watch_address[slot], sizeof(hit.value) - 1);
+        }
+    } else {
+        ++g_hits_dropped;
+    }
+
+    info->ContextRecord->Dr6 = 0;
+
+    if (g_watch_execute[slot]) {
+        info->ContextRecord->EFlags |= 0x10000; // resume flag: run the instruction instead of breaking again
+    }
+
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// Consecutive hits with the same stack are printed once with a count and the value after the last of them.
+void TestBot::list_hits() {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const auto end = base + nt->OptionalHeader.SizeOfImage;
+    const auto count = std::min(g_hit_count.load(), MAX_HITS);
+    const auto address = [&](uintptr_t a) {
+        std::ostringstream s{};
+        s << (a >= base && a < end ? "+0x" : "0x") << std::hex << (a >= base && a < end ? a - base : a);
+        return s.str();
+    };
+
+    for (size_t i = 0; i < count;) {
+        const auto& hit = g_hits[i];
+        size_t same{1};
+
+        while (i + same < count && g_hits[i + same].rip == hit.rip && !memcmp(g_hits[i + same].stack, hit.stack, sizeof(hit.stack))) {
+            ++same;
+        }
+
+        const auto& last = g_hits[i + same - 1];
+        std::ostringstream line{};
+        line << "hit #" << i << " x" << same << " dr" << hit.slot << " at " << address(hit.rip) << " stack";
+
+        for (const auto frame : hit.stack) {
+            if (frame != 0) {
+                line << " " << address(frame);
+            }
+        }
+
+        std::string text{};
+
+        for (const auto c : last.value) {
+            text += (c >= 0x20 && c < 0x7F) ? c : '.';
+        }
+
+        if (g_watch_execute[hit.slot]) {
+            line << " args " << std::hex << hit.args[0] << " " << hit.args[1] << " " << hit.args[2] << " " << hit.args[3] << std::dec;
+        }
+
+        line << " value " << text;
+        finish(line.str());
+        i += same;
+    }
+
+    finish("ok hits (" + std::to_string(g_hit_count.load()) + " writes, " + std::to_string(g_hits_dropped.load()) + " not kept)");
 }
 
 // Copies the back buffer before the mod's own UI is drawn on it and writes a 32-bit BMP.

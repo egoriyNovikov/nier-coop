@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <Windows.h>
 #include <Xinput.h>
 
 #include <utility/FunctionHook.hpp>
@@ -33,6 +34,8 @@
 //   read <hex rva> <hex length>  hex dump of the exe's memory (research)
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
+//   watch <hex rva> [1|2|4|8|x] hardware breakpoint (up to 4) on writes to exe memory, or x = on executing code; "watch off" clears
+//   hits                         what watch caught: instruction, call stack (exe rvas), value after the write / rcx rdx r8 r9
 class TestBot : public Mod {
 public:
     std::string_view get_name() const override {
@@ -64,6 +67,20 @@ private:
     void take_snapshot(const std::string& name);
     void filter_candidates(const std::string& name, const std::string& rule);
     void list_candidates(size_t count);
+    void add_watch(uintptr_t rva, uint32_t length);
+    void clear_watches();
+    void arm_threads();
+    void list_hits();
+    static LONG WINAPI on_exception(EXCEPTION_POINTERS* info);
+
+    struct Watch {
+        uintptr_t address{};
+        uint32_t length{};
+    };
+
+    std::vector<Watch> m_watches{};
+    std::unordered_map<DWORD, size_t> m_armed_threads{}; // thread id -> number of watches set in its debug registers
+    void* m_exception_handler{};
 
     struct Snapshot {
         std::vector<std::pair<uint32_t, std::vector<uint8_t>>> ranges{}; // section rva, bytes
