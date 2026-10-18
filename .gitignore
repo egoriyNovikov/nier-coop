@@ -64,3 +64,6 @@ server_log.txt
 
 # Copies of player logs kept by a locally started server
 server/logs/
+
+# Isolated test copies of the game (tools/qa/make_test_install.ps1)
+.testinstall/
