@@ -821,10 +821,17 @@ void NierClient::send_log_copy() {
         const auto& sinks = spdlog::default_logger()->sinks();
         const auto file_sink = !sinks.empty() ? std::dynamic_pointer_cast<spdlog::sinks::basic_file_sink_mt>(sinks[0]) : nullptr;
 
-        // Shared read: spdlog keeps writing the file.
-        if (file_sink == nullptr || (m_log_copy_file = _fsopen(file_sink->filename().c_str(), "rb", _SH_DENYNO)) == nullptr) {
+        if (file_sink == nullptr) {
             m_server_accepts_logs = false;
-            spdlog::error("[Coop] Can't read our own log, the server won't get a copy of it");
+            spdlog::error("[Coop] Can't find our log file ({} sinks), the server won't get a copy of it", sinks.size());
+            return;
+        }
+
+        // Shared read: spdlog keeps writing the file.
+        if ((m_log_copy_file = _fsopen(file_sink->filename().c_str(), "rb", _SH_DENYNO)) == nullptr) {
+            m_server_accepts_logs = false;
+            spdlog::error("[Coop] Can't read our own log {} (errno {}), the server won't get a copy of it",
+                file_sink->filename(), errno);
             return;
         }
     }

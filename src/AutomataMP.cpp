@@ -130,6 +130,19 @@ void AutomataMP::hook_monitor() {
 namespace {
 // Every running copy of the game gets its own log (automatamp_log.txt, automatamp_log_2.txt, ...),
 // otherwise a second copy truncates and overwrites the log of the first one.
+// The path is absolute (next to the game exe): the copy of the log for the server reopens it later,
+// when the current directory may be different.
+std::string get_log_path(const std::string& name) {
+    char exe_path[MAX_PATH]{};
+    const auto length = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+
+    if (length == 0 || length >= MAX_PATH) {
+        return name;
+    }
+
+    return (std::filesystem::path{exe_path}.parent_path() / name).string();
+}
+
 std::string get_log_filename() {
     for (auto i = 1; i < 16; ++i) {
         const auto mutex_name = "AutomataMP_LogInstance_" + std::to_string(i);
@@ -146,10 +159,10 @@ std::string get_log_filename() {
             continue;
         }
 
-        return i == 1 ? "automatamp_log.txt" : "automatamp_log_" + std::to_string(i) + ".txt";
+        return get_log_path(i == 1 ? "automatamp_log.txt" : "automatamp_log_" + std::to_string(i) + ".txt");
     }
 
-    return "automatamp_log_" + std::to_string(GetCurrentProcessId()) + ".txt";
+    return get_log_path("automatamp_log_" + std::to_string(GetCurrentProcessId()) + ".txt");
 }
 }
 
