@@ -11,4 +11,12 @@ namespace sdk {
 std::string get_phase_name();
 // The int32 right before the name. The game compares it with 0x100; meaning unknown.
 int32_t get_phase_id();
+
+// Route of the story: 'A', 'B' or 'C', 0 if unknown. The game keeps it as the scene state flags "Route/A",
+// "Route/B", "Route/C" (Chapter Select sets one of them, build 7020666: +0x95cd65). Game thread only.
+// system: the SceneStateSystem the game's scripts call (StoryWatcher takes it from SceneStateSystem.set).
+char get_route(void* system);
+// Hero of the route as the scene state flags "PL/2B", "PL/9S", "PL/A2" say: "2B", "9S", "A2", empty if none.
+// Game thread only.
+std::string get_story_character(void* system);
 }

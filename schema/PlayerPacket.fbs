@@ -35,6 +35,8 @@ table StoryState {
     phase_id: int;
     scene_state_changes: uint; // story flags changed since the sender's game started
     event: uint; // story event (cutscene) playing now, ev%04x; 0 if none
+    route: ubyte; // 'A', 'B', 'C' (scene state flags Route/A..C); 0 if unknown. Added in 3.2, older builds send 0
+    character: string; // hero of the route: "2B", "9S", "A2" (scene state flags PL/..)
 }
 
 table Buttons {

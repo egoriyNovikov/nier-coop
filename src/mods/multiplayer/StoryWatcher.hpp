@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -17,6 +18,8 @@ public:
     struct Point {
         std::string phase{};
         int32_t phase_id{-1};
+        char route{0}; // 'A', 'B', 'C' (sdk::get_route), 0 if unknown
+        std::string character{}; // hero of the route: "2B", "9S", "A2" (sdk::get_story_character)
         uint32_t scene_state_changes{0}; // how many flags were set/reset since the start, a cheap "something happened"
         uint32_t event{0}; // story event (cutscene) playing now, ev%04x; 0 if none
         uint32_t last_event{0}; // id of the last story event that started
@@ -47,6 +50,8 @@ private:
     Point m_point{};
     std::unordered_map<uint32_t, bool> m_scene_states{}; // CRC of the flag name -> set
     bool m_hooks_tried{false};
+    uint32_t m_updates{0};
+    std::atomic<void*> m_scene_state_system{}; // `this` of the game's SceneStateSystem.set calls
     std::unique_ptr<FunctionHook> m_set_hook{};
     std::unique_ptr<FunctionHook> m_reset_hook{};
     std::unique_ptr<safetyhook::MidHook> m_event_hook{};

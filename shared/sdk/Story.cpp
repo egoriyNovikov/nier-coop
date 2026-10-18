@@ -3,6 +3,8 @@
 #include <utility/Scan.hpp>
 #include <utility/Module.hpp>
 
+#include "hap/scene_state/SceneStateSystem.hpp"
+#include "ScriptFunctions.hpp"
 #include "Story.hpp"
 
 namespace sdk {
@@ -46,5 +48,40 @@ std::string get_phase_name() {
 int32_t get_phase_id() {
     const auto phase = get_phase_global();
     return phase != nullptr ? phase->id : -1;
+}
+}
+
+namespace sdk {
+namespace {
+bool has_scene_state(void* system, std::string_view name) {
+    // find() logs every lookup: look once.
+    static const auto available = ScriptFunctions::get().find("SceneStateSystem.has") != nullptr;
+
+    if (system == nullptr || !available) {
+        return false;
+    }
+
+    return ((hap::scene_state::SceneStateSystem*)system)->has(hap::SceneStateName{name});
+}
+}
+
+char get_route(void* system) {
+    for (const auto route : {'A', 'B', 'C'}) {
+        if (has_scene_state(system, std::string{"Route/"} + route)) {
+            return route;
+        }
+    }
+
+    return 0;
+}
+
+std::string get_story_character(void* system) {
+    for (const auto character : {"2B", "9S", "A2"}) {
+        if (has_scene_state(system, std::string{"PL/"} + character)) {
+            return character;
+        }
+    }
+
+    return {};
 }
 }

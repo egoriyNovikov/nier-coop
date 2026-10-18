@@ -7,6 +7,7 @@
 
 #include <sdk/ScriptFunctions.hpp>
 #include <sdk/Story.hpp>
+#include <sdk/hap/scene_state/SceneStateSystem.hpp>
 
 #include "ScriptTracer.hpp"
 #include "StoryWatcher.hpp"
@@ -25,6 +26,22 @@ void StoryWatcher::update() {
 
     const auto phase = sdk::get_phase_name();
     const auto phase_id = sdk::get_phase_id();
+
+    // Route and hero are scene state lookups: twice a second is enough.
+    if (m_updates++ % 30 == 0 && m_scene_state_system != nullptr) {
+        const auto route = sdk::get_route(m_scene_state_system);
+        const auto character = sdk::get_story_character(m_scene_state_system);
+
+        std::scoped_lock _{m_mutex};
+
+        if (route != m_point.route || character != m_point.character) {
+            spdlog::info("[Story] Route {} ({}) -> {} ({})", m_point.route != 0 ? std::string{m_point.route} : "none",
+                m_point.character.empty() ? "none" : m_point.character, route != 0 ? std::string{route} : "none",
+                character.empty() ? "none" : character);
+            m_point.route = route;
+            m_point.character = character;
+        }
+    }
 
     std::scoped_lock _{m_mutex};
 
@@ -77,6 +94,10 @@ bool StoryWatcher::on_scene_state(bool set, void* system, void* name) {
     auto& self = get();
     const auto& hook = set ? self.m_set_hook : self.m_reset_hook;
     const auto result = hook->get_original<bool(void*, void*)>()(system, name);
+
+    if (self.m_scene_state_system.exchange(system) != system) {
+        spdlog::info("[Story] Scene state system: {} (sdk: {})", system, (void*)sdk::hap::scene_state::SceneStateSystem::get());
+    }
 
     uint32_t crc{0};
     std::string text{};

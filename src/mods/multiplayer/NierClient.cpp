@@ -1953,11 +1953,14 @@ void NierClient::send_story_state() {
 
     flatbuffers::FlatBufferBuilder builder(0);
     const auto phase = builder.CreateString(point.phase);
+    const auto character = builder.CreateString(point.character);
     nier::StoryStateBuilder data_builder(builder);
     data_builder.add_phase(phase);
     data_builder.add_phase_id(point.phase_id);
     data_builder.add_scene_state_changes(point.scene_state_changes);
     data_builder.add_event(point.event);
+    data_builder.add_route((uint8_t)point.route);
+    data_builder.add_character(character);
     builder.Finish(data_builder.Finish());
 
     send_packet(nier::PacketType_ID_STORY_STATE, builder.GetBufferPointer(), builder.GetSize());
@@ -1992,6 +1995,8 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
     story.phase_id = data->phase_id();
     story.scene_state_changes = data->scene_state_changes();
     story.event = data->event();
+    story.route = (char)data->route();
+    story.character = data->character() != nullptr ? data->character()->str() : "";
     story.known = true;
 
     if (story.event != player.get_story().event) {
@@ -2000,6 +2005,14 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
         } else {
             spdlog::info("[Story] {}: cutscene ev{:04x} ended", player.get_name(), player.get_story().event);
         }
+    }
+
+    if (story.route != player.get_story().route || story.character != player.get_story().character) {
+        const auto ours = StoryWatcher::get().current();
+        const auto route_name = [](char route) { return route != 0 ? std::string{"route "} + route : std::string{"unknown route"}; };
+        spdlog::info("[Story] {} is on {} ({}), we are on {} ({}){}", player.get_name(), route_name(story.route),
+            story.character.empty() ? "?" : story.character, route_name(ours.route), ours.character.empty() ? "?" : ours.character,
+            story.route == ours.route || story.route == 0 || ours.route == 0 ? "" : ": different routes");
     }
 
     if (story.phase != player.get_story().phase || story.phase_id != player.get_story().phase_id) {

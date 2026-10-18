@@ -1,13 +1,15 @@
 """Co-op smoke test (task 0.5.8): two test copies of the game connect to each other without a person.
 
-  python tools/qa/coop_smoke.py [--scenario together|diverged] [--no-build]
+  python tools/qa/coop_smoke.py [--scenario together|diverged|routes] [--no-build]
 
 1. Builds the mod and the server, installs them into .testinstall/slot1 (host) and slot2 (client).
 2. Both copies load a save through the test bot (together: both the "Test" save at the Bunker;
-   diverged: the host the "Test" save, the client the finished save at the Resistance Camp).
+   diverged: the host the "Test" save, the client the finished save at the Resistance Camp;
+   routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B)).
 3. slot1 presses "Host Game", slot2 "Join Game" to 127.0.0.1:6969.
 4. Asserts: both are in the session, slot1 leads the story and slot2 doesn't, each sees the other
-   player's position close to where the other game says its player is, the phase is the same.
+   player's position close to where the other game says its player is, the phase and route are known
+   to the other side; per scenario: same phase and roles / different phases / different routes.
 5. Closes both and checks isolation (the owner's saves and config unchanged, nothing blocked).
 Prints RESULT: PASS or RESULT: FAIL; exit code 0 on PASS.
 """
@@ -52,8 +54,9 @@ def position(text):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged"], default="together",
-                        help="together: both load the same save; diverged: the games are at different story points")
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes"], default="together",
+                        help="together: both load the same save; diverged: the games are at different story points; "
+                             "routes: the games are on routes A and B")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -68,10 +71,7 @@ def main():
             failures.append(message)
 
     try:
-        if args.scenario == "together":
-            together(expect)
-        else:
-            diverged(expect)
+        {"together": together, "diverged": diverged, "routes": routes}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -86,6 +86,7 @@ def main():
 
 def connect(expect, host_save, client_save):
     """Loads the saves, Host Game + Join Game, waits for both to have the other's data.
+    A save is its index (0 = top) or a function (slot) -> bool that gets the game into the world.
     Returns (host_coop, client_coop, host_state, client_state) or None."""
     # One copy after the other: two copies loading at once reach the title screen late.
     for slot, save in ((HOST, host_save), (CLIENT, client_save)):
@@ -94,10 +95,10 @@ def connect(expect, host_save, client_save):
             if attempt > 0:
                 print(f"{slot}: retrying with a fresh start")
                 bot.stop(slot)
-            if bot.start(slot) and bot.load(slot, save):
+            if bot.start(slot) and (save(slot) if callable(save) else bot.load(slot, save)):
                 loaded = True
                 break
-        expect(loaded, f"{slot} loaded save {save}")
+        expect(loaded, f"{slot} loaded save {save.__doc__ if callable(save) else save}")
         if not loaded:
             return None
 
@@ -128,6 +129,8 @@ def connect(expect, host_save, client_save):
            f"the host knows the client's phase ({parse(host_coop, 'other_story')})")
     expect(parse(client_coop, "other_story") == parse(host_state, "phase"),
            f"the client knows the host's phase ({parse(client_coop, 'other_story')})")
+    expect(parse(host_coop, "other_route") == parse(client_state, "route")
+           and parse(client_coop, "other_route") == parse(host_state, "route"), "each knows the other's route")
     return host_coop, client_coop, host_state, client_state
 
 
@@ -137,6 +140,9 @@ def together(expect):
     if result is None:
         return
     host_coop, client_coop, host_state, client_state = result
+    # Route from the scene state flags Route/A..C (sdk::get_route).
+    expect(parse(host_state, "route") == "A" and parse(client_state, "route") == "A",
+           f"both games are on route A ({parse(host_state, 'route')} / {parse(client_state, 'route')})")
 
     # Each game's view of the other player against where the other game says its player is.
     for viewer, view, other, other_state in ((HOST, host_coop, CLIENT, client_state), (CLIENT, client_coop, HOST, host_state)):
@@ -176,6 +182,25 @@ def diverged(expect):
 
     bot.cmd(HOST, ["shot diverged_host"])
     bot.cmd(CLIENT, ["shot diverged_client"])
+
+
+def routes(expect):
+    """The host on route A ("Test" save), the client on route B (Chapter Select on the finished save as 9S):
+    both must see that the routes differ (concept 5.6, TASKS 3.1.1)."""
+    def chapter_as_9s(slot):
+        """finished save, Chapter Select as 9S"""
+        return bot.chapter(slot, 0, 2, 0, "9S")
+
+    result = connect(expect, 1, chapter_as_9s)
+    if result is None:
+        return
+    host_coop, client_coop, host_state, client_state = result
+
+    expect(parse(host_state, "route") == "A" and parse(client_state, "route") == "B",
+           f"the host is on route A, the client on route B ({parse(host_state, 'route')} / {parse(client_state, 'route')})")
+    expect(parse(client_state, "hero") == "9S", f"the client's game has 9S as the hero ({parse(client_state, 'hero')})")
+    expect("different routes" in log_text(HOST) and "different routes" in log_text(CLIENT),
+           "both logs say the routes differ")
 
 
 if __name__ == "__main__":

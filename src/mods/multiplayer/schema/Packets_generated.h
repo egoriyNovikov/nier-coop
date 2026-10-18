@@ -1177,7 +1177,9 @@ struct StoryState FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_PHASE = 4,
     VT_PHASE_ID = 6,
     VT_SCENE_STATE_CHANGES = 8,
-    VT_EVENT = 10
+    VT_EVENT = 10,
+    VT_ROUTE = 12,
+    VT_CHARACTER = 14
   };
   const flatbuffers::String *phase() const {
     return GetPointer<const flatbuffers::String *>(VT_PHASE);
@@ -1191,6 +1193,12 @@ struct StoryState FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t event() const {
     return GetField<uint32_t>(VT_EVENT, 0);
   }
+  uint8_t route() const {
+    return GetField<uint8_t>(VT_ROUTE, 0);
+  }
+  const flatbuffers::String *character() const {
+    return GetPointer<const flatbuffers::String *>(VT_CHARACTER);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_PHASE) &&
@@ -1198,6 +1206,9 @@ struct StoryState FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_PHASE_ID) &&
            VerifyField<uint32_t>(verifier, VT_SCENE_STATE_CHANGES) &&
            VerifyField<uint32_t>(verifier, VT_EVENT) &&
+           VerifyField<uint8_t>(verifier, VT_ROUTE) &&
+           VerifyOffset(verifier, VT_CHARACTER) &&
+           verifier.VerifyString(character()) &&
            verifier.EndTable();
   }
 };
@@ -1218,6 +1229,12 @@ struct StoryStateBuilder {
   void add_event(uint32_t event) {
     fbb_.AddElement<uint32_t>(StoryState::VT_EVENT, event, 0);
   }
+  void add_route(uint8_t route) {
+    fbb_.AddElement<uint8_t>(StoryState::VT_ROUTE, route, 0);
+  }
+  void add_character(flatbuffers::Offset<flatbuffers::String> character) {
+    fbb_.AddOffset(StoryState::VT_CHARACTER, character);
+  }
   explicit StoryStateBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1234,12 +1251,16 @@ inline flatbuffers::Offset<StoryState> CreateStoryState(
     flatbuffers::Offset<flatbuffers::String> phase = 0,
     int32_t phase_id = 0,
     uint32_t scene_state_changes = 0,
-    uint32_t event = 0) {
+    uint32_t event = 0,
+    uint8_t route = 0,
+    flatbuffers::Offset<flatbuffers::String> character = 0) {
   StoryStateBuilder builder_(_fbb);
+  builder_.add_character(character);
   builder_.add_event(event);
   builder_.add_scene_state_changes(scene_state_changes);
   builder_.add_phase_id(phase_id);
   builder_.add_phase(phase);
+  builder_.add_route(route);
   return builder_.Finish();
 }
 
@@ -1248,14 +1269,19 @@ inline flatbuffers::Offset<StoryState> CreateStoryStateDirect(
     const char *phase = nullptr,
     int32_t phase_id = 0,
     uint32_t scene_state_changes = 0,
-    uint32_t event = 0) {
+    uint32_t event = 0,
+    uint8_t route = 0,
+    const char *character = nullptr) {
   auto phase__ = phase ? _fbb.CreateString(phase) : 0;
+  auto character__ = character ? _fbb.CreateString(character) : 0;
   return nier::CreateStoryState(
       _fbb,
       phase__,
       phase_id,
       scene_state_changes,
-      event);
+      event,
+      route,
+      character__);
 }
 
 struct Buttons FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {

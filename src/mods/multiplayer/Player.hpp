@@ -72,6 +72,8 @@ public:
         int32_t phase_id{-1};
         uint32_t scene_state_changes{0};
         uint32_t event{0}; // cutscene playing in that game, ev%04x; 0 if none
+        char route{0}; // 'A', 'B', 'C'; 0 if unknown (older builds)
+        std::string character{}; // hero of the route: "2B", "9S", "A2"
         bool known{false};
     };
 

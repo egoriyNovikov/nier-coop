@@ -11,6 +11,9 @@
 namespace sdk::hap::scene_state {
 class SceneStateSystem : public ::sdk::hap::StateObject, public ::sdk::hap::TokenCategory {
 public:
+    // Wrong on Steam build 7020666: returns 8 bytes before the object the game's scripts and Chapter Select
+    // use (base + 0xfc2370), and has() crashed with it (2026-10-18). StoryWatcher takes `this` from the
+    // game's own SceneStateSystem.set calls instead.
     static SceneStateSystem* get();
 
 public:

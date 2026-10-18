@@ -237,10 +237,12 @@ std::string AutomataMPMod::describe_coop() {
         return s.str();
     }
 
-    s << " story=" << StoryWatcher::get().current().phase;
+    const auto ours = StoryWatcher::get().current();
+    s << " story=" << ours.phase << " route=" << (ours.route != 0 ? std::string{ours.route} : "none");
 
     for (const auto& [name, story] : m_client->get_other_stories()) {
         s << " other_story=" << (story.known ? story.phase : "unknown");
+        s << " other_route=" << (story.known && story.route != 0 ? std::string{story.route} : "none");
     }
 
     s << " connected=" << m_client->is_connected() << " session=" << m_client->is_in_session()
@@ -428,12 +430,15 @@ void AutomataMPMod::display_coop() {
 
     // Story point of both games (TASKS 2.6.3): a different phase means the games went apart.
     const auto ours = StoryWatcher::get().current();
-    ImGui::TextWrapped("Story: we are in %s", ours.phase.empty() ? "(unknown)" : ours.phase.c_str());
+    ImGui::TextWrapped("Story: we are in %s, route %s (%s)", ours.phase.empty() ? "(unknown)" : ours.phase.c_str(),
+        ours.route != 0 ? std::string{ours.route}.c_str() : "?", ours.character.empty() ? "?" : ours.character.c_str());
 
     if (m_client != nullptr) {
         for (const auto& [name, story] : m_client->get_other_stories()) {
             if (!story.known) {
                 ImGui::TextWrapped("Story: %s (no data yet)", name.c_str());
+            } else if (story.route != 0 && ours.route != 0 && story.route != ours.route) {
+                ImGui::TextColored(ImVec4{1.0f, 0.6f, 0.2f, 1.0f}, "Story: %s is on route %c, we are on route %c (different routes)", name.c_str(), story.route, ours.route);
             } else if (story.event != 0) {
                 ImGui::TextWrapped("Story: %s is watching cutscene ev%04x", name.c_str(), story.event);
             } else if (story.phase != ours.phase) {
