@@ -5,6 +5,7 @@
 #include "mods/AnimTester.hpp"
 #include "mods/BuddyFeatures.hpp"
 #include "mods/Explorer.hpp"
+#include "mods/TestBot.hpp"
 
 #include "Mods.hpp"
 
@@ -14,6 +15,7 @@ Mods::Mods() {
     m_mods.emplace_back(new BuddyFeatures());
     m_mods.emplace_back(new AnimTester());
     m_mods.emplace_back(new Explorer());
+    m_mods.emplace_back(new TestBot());
 }
 
 std::optional<std::string> Mods::on_initialize() const {

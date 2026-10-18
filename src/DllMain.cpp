@@ -14,6 +14,7 @@
 #include <utility/FunctionHook.hpp>
 
 #include "ExceptionHandler.hpp"
+#include "TestMode.hpp"
 #include "AutomataMP.hpp"
 
 HMODULE g_dinput = 0;
@@ -189,6 +190,18 @@ NTSTATUS NTAPI nt_create_file_hook(PHANDLE handle, ACCESS_MASK access, POBJECT_A
     }
 
     return original(handle, access, attributes, io, allocation_size, file_attributes, share, disposition, options, ea, ea_length);
+}
+
+namespace testmode {
+bool enabled() {
+    return g_test_documents[0] != '\0';
+}
+
+std::filesystem::path root() {
+    char exe_path[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+    return std::filesystem::path{exe_path}.parent_path();
+}
 }
 
 void setup_test_mode() {
