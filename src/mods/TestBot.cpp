@@ -1,4 +1,5 @@
 #include <atomic>
+#include <thread>
 #include <cmath>
 #include <iomanip>
 #include <regex>
@@ -16,6 +17,7 @@
 
 #include "../AutomataMP.hpp"
 #include "../TestMode.hpp"
+#include "AutomataMPMod.hpp"
 #include "TestBot.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -65,6 +67,7 @@ std::optional<std::string> TestBot::on_initialize() {
         }
     }
 
+    std::thread{[this] { bot_thread(); }}.detach();
     spdlog::info("[Test] Test bot ready, commands from {}", (testmode::root() / "coop_test_cmd.txt").string());
     finish("ready");
     return std::nullopt;
@@ -89,11 +92,31 @@ DWORD WINAPI TestBot::xinput_get_state(DWORD user_index, XINPUT_STATE* state) {
     return ERROR_SUCCESS;
 }
 
+// Screenshots need the render thread: the bot thread asks, the next present takes the shot.
 void TestBot::on_present() {
     if (g_bot != this) {
         return;
     }
 
+    std::unique_lock lock{m_shot_mutex};
+
+    if (!m_shot_request.empty()) {
+        take_screenshot(m_shot_request);
+        m_shot_request.clear();
+        m_shot_done.notify_all();
+    }
+}
+
+// Commands run on their own thread, not in present: the game stops presenting at times (a hung window,
+// Steam's text input), and the bot must still answer.
+void TestBot::bot_thread() {
+    while (true) {
+        tick();
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+}
+
+void TestBot::tick() {
     const auto now = std::chrono::steady_clock::now();
 
     if (m_busy && now >= m_until) {
@@ -111,7 +134,7 @@ void TestBot::on_present() {
         finish("ok " + m_current);
     }
 
-    if (++m_frame % 15 == 0) {
+    if (++m_frame % 25 == 0) {
         read_commands();
     }
 
@@ -192,9 +215,23 @@ void TestBot::start(const Command& command) {
             m_busy = true;
             m_until = now + ms(command.arg1);
         } else if (command.verb == "shot") {
-            take_screenshot(command.arg1.empty() ? "shot" : command.arg1);
+            std::unique_lock lock{m_shot_mutex};
+            m_shot_request = command.arg1.empty() ? "shot" : command.arg1;
+
+            if (!m_shot_done.wait_for(lock, std::chrono::seconds{3}, [this] { return m_shot_request.empty(); })) {
+                m_shot_request.clear();
+                finish("error shot: the game rendered no frame for 3 s");
+            }
         } else if (command.verb == "state") {
             finish(describe_state());
+        } else if (command.verb == "host") {
+            const auto error = AutomataMPMod::get()->host_game(command.arg1.empty() ? "6969" : command.arg1);
+            finish(error ? "error host: " + *error : "ok " + command.text);
+        } else if (command.verb == "join") {
+            const auto error = AutomataMPMod::get()->join_game(command.arg1, command.arg2 == "host");
+            finish(error ? "error join: " + *error : "ok " + command.text);
+        } else if (command.verb == "coop") {
+            finish(AutomataMPMod::get()->describe_coop());
         } else if (command.verb == "read") {
             // read <hex rva> <hex length>: hex dump of the exe's memory, 16 bytes per line.
             const auto base = (uintptr_t)GetModuleHandleW(nullptr);
@@ -239,11 +276,12 @@ std::string TestBot::describe_state() {
 
     if (!sdk::is_loading()) {
         const auto entity_list = sdk::EntityList::get();
-        const auto player = entity_list != nullptr ? entity_list->get_by_name("Player") : nullptr;
+        // The character we control: after a co-op swap that's the story buddy (9S), not the entity named "Player".
+        const auto player = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
 
         if (player != nullptr && player->behavior != nullptr) {
             const auto& p = player->behavior->position();
-            s << " player=" << p.x << "," << p.y << "," << p.z;
+            s << " player=" << p.x << "," << p.y << "," << p.z << " model=" << std::hex << (uint32_t)player->behavior->model_index() << std::dec;
         } else {
             s << " player=none";
         }

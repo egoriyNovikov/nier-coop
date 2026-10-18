@@ -6,6 +6,9 @@
 # - coop_test.ini turns on the test mode of the mod: saves and Graphic.ini go to <slot>\documents
 #   instead of %USERPROFILE%\Documents (and Steam Cloud), config.ini to <slot>\appdata instead of %APPDATA%.
 #   Writes to the owner's Documents, %APPDATA%\PlatinumGames and install fail.
+# WARNING: NVIDIA App notices a new folder with the game on its first launch and "optimizes" it: its
+# OAWrapper.exe rewrites the owner's Documents\My Games\NieR_Automata\SystemData.dat (outside the mod's reach).
+# Reuse the existing slots, or turn off automatic optimization of new games in NVIDIA App first.
 param(
     [string]$Source = "D:\Steam\steamapps\common\NieRAutomata",
     [string]$Slot = "slot1"

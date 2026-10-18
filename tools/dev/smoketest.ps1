@@ -2,7 +2,8 @@
 # then checks the logs. Catches a mod that crashes or fails to start; gameplay still needs a person.
 # Exit code 0 when everything looks fine.
 param(
-    [string]$GameDir = "D:\Steam\steamapps\common\NieRAutomata",
+    # A test copy (tools/qa/make_test_install.ps1), never the owner's install (coop-anything rule 2).
+    [string]$GameDir = (Join-Path $PSScriptRoot "..\..\.testinstall\slot1"),
     [int]$Instances = 1,
     [int]$Seconds = 60,
     [switch]$KeepRunning # Leave the games open after the check.

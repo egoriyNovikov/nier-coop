@@ -70,6 +70,11 @@ public:
         return m_client;
     }
 
+    // "Host Game" and "Join Game" of the Co-op menu; also used by the test bot. Return an error message.
+    std::optional<std::string> host_game(const std::string& port);
+    std::optional<std::string> join_game(const std::string& address_and_port, bool as_host);
+    std::string describe_coop();
+
 private:
     std::chrono::high_resolution_clock::time_point m_next_think;
 

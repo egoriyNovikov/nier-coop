@@ -1,3 +1,4 @@
+#include <sstream>
 #include <mutex>
 #include <regex>
 
@@ -193,6 +194,67 @@ void AutomataMPMod::display_manual_connect() {
     ImGui::InputText("Connect Port", m_port_connect_input.data(), m_port_connect_input.size());
     ImGui::InputText("Name", m_name_input.data(), m_name_input.size());
     ImGui::InputText("Password", m_password_input.data(), m_password_input.size());
+}
+
+std::optional<std::string> AutomataMPMod::host_game(const std::string& port) {
+    if (const auto error = m_coop_server.start(port, m_password_input.data()); error) {
+        m_coop_status = *error;
+        return error;
+    }
+
+    m_is_hosting = true;
+    start_connect(DEFAULT_IP, port, true, true);
+    return std::nullopt;
+}
+
+std::optional<std::string> AutomataMPMod::join_game(const std::string& address_and_port, bool as_host) {
+    std::string address = address_and_port;
+    std::string port = DEFAULT_PORT;
+
+    if (const auto colon = address.rfind(':'); colon != std::string::npos) {
+        port = address.substr(colon + 1);
+        address = address.substr(0, colon);
+    }
+
+    if (address.empty() || port.empty() || !std::all_of(port.begin(), port.end(), ::isdigit)) {
+        m_coop_status = "Enter the address as IP:port, for example 192.168.1.10:6969";
+        return m_coop_status;
+    }
+
+    start_connect(address, port, false, as_host);
+    return std::nullopt;
+}
+
+// One line for the test bot: connection, role and what we know about the other player.
+std::string AutomataMPMod::describe_coop() {
+    std::scoped_lock _{m_client_mutex};
+    std::ostringstream s{};
+    s << "coop status=\"" << m_coop_status << "\"";
+
+    if (m_client == nullptr) {
+        s << " client=none";
+        return s.str();
+    }
+
+    s << " connected=" << m_client->is_connected() << " session=" << m_client->is_in_session()
+      << " in_world=" << m_client->is_in_world() << " master=" << m_client->is_master_client()
+      << " guid=" << m_client->get_guid();
+
+    for (const auto& [guid, player] : m_client->get_players()) {
+        if (player == nullptr || guid == m_client->get_guid()) {
+            continue;
+        }
+
+        s << " other=" << guid << ":" << player->get_name() << " model=" << std::hex << player->get_model() << std::dec
+          << " handle=" << std::hex << player->get_handle() << std::dec << " data=" << player->has_player_data();
+
+        if (player->has_player_data()) {
+            const auto& p = player->get_player_data().position();
+            s << " pos=" << p.x() << "," << p.y() << "," << p.z();
+        }
+    }
+
+    return s.str();
 }
 
 void AutomataMPMod::start_connect(const std::string& host, const std::string& port, bool is_host, bool wants_host) {
@@ -404,31 +466,14 @@ void AutomataMPMod::display_coop() {
     ImGui::SameLine();
 
     if (ImGui::Button("Host Game")) {
-        if (const auto error = m_coop_server.start(m_host_port_input.data(), m_password_input.data()); error) {
-            m_coop_status = *error;
-        } else {
-            m_is_hosting = true;
-            start_connect(DEFAULT_IP, m_host_port_input.data(), true, true);
-        }
+        host_game(m_host_port_input.data());
     }
 
     ImGui::Separator();
     ImGui::InputText("Host address", m_join_address_input.data(), m_join_address_input.size());
 
     if (ImGui::Button("Join Game")) {
-        std::string address = m_join_address_input.data();
-        std::string port = DEFAULT_PORT;
-
-        if (const auto colon = address.rfind(':'); colon != std::string::npos) {
-            port = address.substr(colon + 1);
-            address = address.substr(0, colon);
-        }
-
-        if (address.empty() || port.empty() || !std::all_of(port.begin(), port.end(), ::isdigit)) {
-            m_coop_status = "Enter the address as IP:port, for example 192.168.1.10:6969";
-        } else {
-            start_connect(address, port, false, m_join_as_host);
-        }
+        join_game(m_join_address_input.data(), m_join_as_host);
     }
 
     ImGui::SameLine();

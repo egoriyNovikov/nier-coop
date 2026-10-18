@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <fstream>
 #include <memory>
@@ -23,6 +24,9 @@
 //   wait <ms>
 //   shot <name>                  screenshot of the game frame to shots\<name>.bmp (rendered by the game, not the desktop)
 //   state                        loading flag, player position
+//   host [port]                  "Host Game": starts automatamp_server\server.exe and connects (port 6969 by default)
+//   join <ip:port> [host]        "Join Game"; "host" = join as the player leading the story
+//   coop                         connection, role and the other player as the mod sees them
 //   read <hex rva> <hex length>  hex dump of the exe's memory (research)
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
@@ -46,6 +50,8 @@ private:
         std::string arg3{};
     };
 
+    void bot_thread();
+    void tick();
     void read_commands();
     void start(const Command& command);
     void finish(const std::string& line);
@@ -59,7 +65,11 @@ private:
     std::string m_current{};
     std::chrono::steady_clock::time_point m_until{};
     std::ofstream m_out{};
-    uint32_t m_frame{0};
+    uint32_t m_frame{0}; // bot thread ticks
+
+    std::mutex m_shot_mutex{};
+    std::condition_variable m_shot_done{};
+    std::string m_shot_request{}; // name of the screenshot the bot thread waits for
 
     std::unique_ptr<FunctionHook> m_xinput_hook{};
 };

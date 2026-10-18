@@ -44,10 +44,16 @@ def out_lines(root):
 
 def wait_for(root, count, timeout):
     end = time.time() + timeout
+    next_alive_check = time.time() + 5
     while time.time() < end:
         lines = out_lines(root)
         if len(lines) >= count:
             return lines
+        # Don't wait for answers from a game that has exited.
+        if time.time() > next_alive_check:
+            if not game_running(root):
+                break
+            next_alive_check = time.time() + 5
         time.sleep(0.25)
     return out_lines(root)
 
@@ -78,10 +84,11 @@ def start(slot):
         (root / name).unlink(missing_ok=True)
     subprocess.Popen([str(root / "NieRAutomata.exe")], cwd=root)
     lines = wait_for(root, 1, 90)
-    print("\n".join(lines) if lines else "bot did not start in 90 s")
+    print(f"{slot}: " + ("\n".join(lines) if lines else "the bot did not start"))
+    return bool(lines)
 
 
-def cmd(slot, commands):
+def cmd(slot, commands, quiet=False):
     root = slot_dir(slot)
     before = len(out_lines(root))
     tmp = root / "coop_test_cmd.tmp"
@@ -91,29 +98,88 @@ def cmd(slot, commands):
     timeout = 30 + sum(int(c.split()[-1]) / 1000 for c in commands
                        if c.split()[0] in ("pad", "stick", "wait") and c.split()[-1].isdigit())
     lines = wait_for(root, before + len(commands), timeout)[before:]
+    result = []
     for line in lines:
         if line.startswith("shot "):
             line = "shot " + str(to_png(Path(line[5:])))
-        print(line)
+        result.append(line)
+        if not quiet:
+            print(f"{slot}: {line}")
     if len(lines) < len(commands):
-        print(f"timeout: {len(lines)} of {len(commands)} commands finished")
+        print(f"{slot}: timeout: {len(lines)} of {len(commands)} commands finished")
+    return result
 
 
-def load(slot, save_index):
-    """Title screen -> Continue -> save N (0 = top) -> Yes -> Start Game, then wait for the player."""
+# Menu screens are recognised by comparing parts of a screenshot with reference screenshots of the same
+# screens in .testinstall/reference/<screen>.png (local only: they are images of the game, not for git).
+# Make them once with `cmd shot <name>` on each screen. Blind timed presses were not enough: a press lost
+# on the title screen shifted the rest and once ended in License, once in Exit Game -> Yes.
+REFERENCE = REPO / ".testinstall" / "reference"
+SCREENS = ["title", "main_menu", "load_game", "confirm_load", "start_menu", "name_entry"]
+# (x0, y0, x1, y1, size): screen header ("LOAD GAME" / "START MENU" text), centre (main menu items vs
+# "Press Any Button"), save thumbnail (only on Load Game). Measured 2026-10-18: closest pair of different
+# screens differs by 10 (title vs main menu, centre), 22+ elsewhere.
+REGIONS = [(0.03, 0.08, 0.30, 0.14, (240, 24)), (0.33, 0.55, 0.67, 0.86, (96, 24)), (0.06, 0.18, 0.20, 0.33, (48, 32))]
+UNKNOWN_DISTANCE = 25
+
+
+def _features(path):
+    from PIL import Image
+    image = Image.open(path).convert("L")
+    w, h = image.size
+    return [image.crop((int(a * w), int(b * h), int(c * w), int(d * h))).resize(size) for a, b, c, d, size in REGIONS]
+
+
+def _distance(a, b):
+    from PIL import ImageChops, ImageStat
+    return sum(ImageStat.Stat(ImageChops.difference(x, y)).mean[0] for x, y in zip(a, b))
+
+
+def screen(slot):
+    """Name of the menu screen the game shows, or "unknown" (logos, loading, the world)."""
+    shot = cmd(slot, ["shot screen"], quiet=True)
+    if not shot or not shot[0].startswith("shot "):
+        return "unknown"
+    features = _features(shot[0][5:])
+    scores = sorted((_distance(features, _features(REFERENCE / f"{name}.png")), name) for name in SCREENS)
+    best_distance, best = scores[0]
+    return best if best_distance <= UNKNOWN_DISTANCE else "unknown"
+
+
+def player_state(slot):
+    state = cmd(slot, ["state"], quiet=True)[-1:]
+    return state[0] if state and "player=" in state[0] and "player=none" not in state[0] else None
+
+
+def load(slot, save_index, timeout=240):
+    """From wherever the menus are into the world of save N (0 = top), looking at the screen before each press."""
     root = slot_dir(slot)
-    cmd(slot, ["wait 15000", "pad A 150", "wait 3000", "pad A 150", "wait 3000"]
-        + ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index
-        + ["pad A 150", "wait 1500", "pad LEFT 120", "pad A 150", "wait 20000", "pad A 150"])
-    for _ in range(30):
-        before = len(out_lines(root))
-        cmd(slot, ["wait 3000", "state"])
-        state = out_lines(root)[before:][-1]
-        if "player=" in state and "player=none" not in state:
-            print("RESULT: PASS loaded")
-            return
+    actions = {
+        "title": ["pad A 150", "wait 2500"],
+        "main_menu": ["pad A 150", "wait 2500"],  # the cursor starts on Continue
+        "load_game": ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index + ["pad A 150", "wait 1500"],
+        "confirm_load": ["pad LEFT 120", "pad A 150", "wait 5000"],
+        "start_menu": ["pad A 150", "wait 5000"],  # Start Game is the first item
+        "name_entry": ["pad B 150", "wait 2000"],  # a new game was started by mistake: back out
+    }
+    end = time.time() + timeout
+    seen = []
+    while time.time() < end:
+        if not game_running(root):
+            print(f"{slot}: RESULT: FAIL the game exited (screens: {' > '.join(seen)})")
+            return False
+        state = player_state(slot)
+        if state:
+            print(f"{slot}: {state}")
+            print(f"{slot}: RESULT: PASS loaded (screens: {' > '.join(seen)})")
+            return True
+        name = screen(slot)
+        if not seen or seen[-1] != name:
+            seen.append(name)
+        cmd(slot, actions.get(name, ["wait 2000"]), quiet=True)
     cmd(slot, ["shot load_failed"])
-    print("RESULT: FAIL the player did not appear")
+    print(f"{slot}: RESULT: FAIL the player did not appear in {timeout} s (screens: {' > '.join(seen)})")
+    return False
 
 
 def check(slot):
@@ -135,16 +201,23 @@ def check(slot):
     for line in blocked:
         print(line)
     ok &= not blocked
-    print("RESULT: PASS" if ok else "RESULT: FAIL")
+    print(f"{slot}: isolation " + ("RESULT: PASS" if ok else "RESULT: FAIL"))
+    return ok
 
 
 def stop(slot):
     root = slot_dir(slot)
     exe = str(root / "NieRAutomata.exe")
+    # Steam Auto-Cloud uploads the owner's save folder when the game exits: a changed owner file must be
+    # dealt with (by the owner) while the game still runs, or the change reaches the cloud.
+    if game_running(root) and not check(slot):
+        print(f"{slot}: NOT closing the game: an owner file changed or a write was blocked. "
+              "Restore the owner's file first, then close the game.")
+        return False
     subprocess.run(["powershell", "-NoProfile", "-Command",
                     f"Get-Process NieRAutomata -ErrorAction SilentlyContinue | Where-Object Path -eq '{exe}' | Stop-Process -Force"])
     time.sleep(5)
-    check(slot)
+    return check(slot)
 
 
 if __name__ == "__main__":
