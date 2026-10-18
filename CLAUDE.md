@@ -12,7 +12,7 @@ Fork of AutomataMP (NieR:Automata multiplayer mod) aimed at a two-player story c
 ## Project notes
 - The user communicates in Russian; answer in Russian.
 - Build: `cmake --build build --config Release --target automatamp`, output `build/bin/automatamp/dinput8.dll`.
-- Game folder of the user: `D:\Steam\steamapps\common\NieRAutomata`. Never touch it or the user's saves (`Documents\My Games\NieR_Automata`, `%APPDATA%\PlatinumGames`). Test in `.testinstall\slotN` (made by `tools/qa/make_test_install.ps1`); logs there: `automatamp_log*.txt`. Reuse slot1/slot2: NVIDIA App rewrites the user's `SystemData.dat` on the first launch from a new folder.
+- Game folder of the user: `D:\Steam\steamapps\common\NieRAutomata`. Never touch it or the user's saves (`Documents\My Games\NieR_Automata`, `%APPDATA%\PlatinumGames`). Test in `.testinstall\slotN` (made by `tools/qa/make_test_install.ps1`); logs there: `automatamp_log*.txt`. NVIDIA App rewrote the user's `SystemData.dat` on the first launch from a new folder until the user turned off "optimize new games" (2026-10-18, checked with slot4); `bot.py` still compares the user's file hashes after every run.
 - x64dbg and Cheat Engine are allowed for reverse engineering. Put findings into `shared/sdk`.
 - The repository stores text files with LF (`.gitattributes`). Write new files with LF; if an editor saves CRLF, git normalizes it on commit, but do not convert whole files, it bloats the working-tree diff.
 - VPS server: `root@95.163.229.188`, key `~/.ssh/nier_vps`, service `nier-coop` (`journalctl -u nier-coop`), config with the password only on the VPS in `/opt/nier-coop/server.json`. Update with `server/deploy/deploy.sh` from Git Bash.
