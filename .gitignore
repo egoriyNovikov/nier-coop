@@ -67,3 +67,6 @@ server/logs/
 
 # Isolated test copies of the game (tools/qa/make_test_install.ps1)
 .testinstall/
+
+# Python bytecode of tools/qa
+__pycache__/
