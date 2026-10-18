@@ -16,7 +16,7 @@ func HandleStoryState(server *structs.Server, sender enet.Peer, connection *stru
 	if connection.Client != nil {
 		name = connection.Client.Name
 	}
-	core.Event(server, "Story: %s is in phase %s (%d), %d flag changes", name, string(state.Phase()), state.PhaseId(), state.SceneStateChanges())
+	core.Event(server, "Story: %s is in phase %s (%d), cutscene ev%04x, %d flag changes", name, string(state.Phase()), state.PhaseId(), state.Event(), state.SceneStateChanges())
 
 	core.BroadcastPlayerPacketToAllExceptSender(server, sender, connection, nier.PacketTypeID_STORY_STATE, data.DataBytes())
 }

@@ -434,6 +434,8 @@ void AutomataMPMod::display_coop() {
         for (const auto& [name, story] : m_client->get_other_stories()) {
             if (!story.known) {
                 ImGui::TextWrapped("Story: %s (no data yet)", name.c_str());
+            } else if (story.event != 0) {
+                ImGui::TextWrapped("Story: %s is watching cutscene ev%04x", name.c_str(), story.event);
             } else if (story.phase != ours.phase) {
                 ImGui::TextColored(ImVec4{1.0f, 0.6f, 0.2f, 1.0f}, "Story: %s is in %s (different phase)", name.c_str(), story.phase.c_str());
             } else {

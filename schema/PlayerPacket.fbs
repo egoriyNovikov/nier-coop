@@ -34,6 +34,7 @@ table StoryState {
     phase: string; // e.g. "16_AB_bunker_Order"
     phase_id: int;
     scene_state_changes: uint; // story flags changed since the sender's game started
+    event: uint; // story event (cutscene) playing now, ev%04x; 0 if none
 }
 
 table Buttons {

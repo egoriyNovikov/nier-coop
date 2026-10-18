@@ -1957,6 +1957,7 @@ void NierClient::send_story_state() {
     data_builder.add_phase(phase);
     data_builder.add_phase_id(point.phase_id);
     data_builder.add_scene_state_changes(point.scene_state_changes);
+    data_builder.add_event(point.event);
     builder.Finish(data_builder.Finish());
 
     send_packet(nier::PacketType_ID_STORY_STATE, builder.GetBufferPointer(), builder.GetSize());
@@ -1990,7 +1991,16 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
     story.phase = data->phase() != nullptr ? data->phase()->str() : "";
     story.phase_id = data->phase_id();
     story.scene_state_changes = data->scene_state_changes();
+    story.event = data->event();
     story.known = true;
+
+    if (story.event != player.get_story().event) {
+        if (story.event != 0) {
+            spdlog::info("[Story] {}: cutscene ev{:04x} started", player.get_name(), story.event);
+        } else {
+            spdlog::info("[Story] {}: cutscene ev{:04x} ended", player.get_name(), player.get_story().event);
+        }
+    }
 
     if (story.phase != player.get_story().phase || story.phase_id != player.get_story().phase_id) {
         const auto ours = StoryWatcher::get().current();

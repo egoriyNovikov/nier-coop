@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include <Xinput.h>
 
@@ -27,6 +29,7 @@
 //   host [port]                  "Host Game": starts automatamp_server\server.exe and connects (port 6969 by default)
 //   join <ip:port> [host]        "Join Game"; "host" = join as the player leading the story
 //   coop                         connection, role and the other player as the mod sees them
+//   snap <name>, filter <name> <=N|!=N|same:<snap>|diff:<snap>|reset>, cands [n]   memory search like Cheat Engine
 //   read <hex rva> <hex length>  hex dump of the exe's memory (research)
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
@@ -58,6 +61,17 @@ private:
     void take_screenshot(const std::string& name);
     void scan_strings(const std::string& pattern);
     void find_xrefs(uintptr_t target, uintptr_t window);
+    void take_snapshot(const std::string& name);
+    void filter_candidates(const std::string& name, const std::string& rule);
+    void list_candidates(size_t count);
+
+    struct Snapshot {
+        std::vector<std::pair<uint32_t, std::vector<uint8_t>>> ranges{}; // section rva, bytes
+    };
+
+    std::unordered_map<std::string, Snapshot> m_snapshots{};
+    std::vector<uint32_t> m_candidates{};
+    bool m_candidates_started{false};
     std::string describe_state();
 
     std::deque<Command> m_queue{};

@@ -65,8 +65,20 @@ func (rcv *StoryState) MutateSceneStateChanges(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(8, n)
 }
 
+func (rcv *StoryState) Event() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *StoryState) MutateEvent(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
 func StoryStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func StoryStateAddPhase(builder *flatbuffers.Builder, phase flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(phase), 0)
@@ -76,6 +88,9 @@ func StoryStateAddPhaseId(builder *flatbuffers.Builder, phaseId int32) {
 }
 func StoryStateAddSceneStateChanges(builder *flatbuffers.Builder, sceneStateChanges uint32) {
 	builder.PrependUint32Slot(2, sceneStateChanges, 0)
+}
+func StoryStateAddEvent(builder *flatbuffers.Builder, event uint32) {
+	builder.PrependUint32Slot(3, event, 0)
 }
 func StoryStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

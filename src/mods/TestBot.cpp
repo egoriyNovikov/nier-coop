@@ -18,6 +18,7 @@
 #include "../AutomataMP.hpp"
 #include "../TestMode.hpp"
 #include "AutomataMPMod.hpp"
+#include "multiplayer/StoryWatcher.hpp"
 #include "TestBot.hpp"
 
 using Microsoft::WRL::ComPtr;
@@ -253,6 +254,12 @@ void TestBot::start(const Command& command) {
             }
 
             finish("ok " + command.text);
+        } else if (command.verb == "snap") {
+            take_snapshot(command.arg1);
+        } else if (command.verb == "filter") {
+            filter_candidates(command.arg1, command.arg2);
+        } else if (command.verb == "cands") {
+            list_candidates(command.arg1.empty() ? 30 : std::stoul(command.arg1));
         } else if (command.verb == "xref") {
             find_xrefs(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 0 : std::stoull(command.arg2, nullptr, 16));
         } else if (command.verb == "scan") {
@@ -273,6 +280,9 @@ void TestBot::finish(const std::string& line) {
 std::string TestBot::describe_state() {
     std::ostringstream s{};
     s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id();
+    const auto story = StoryWatcher::get().current();
+    s << " event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.event << std::dec;
+    s << " events=" << story.events << " last_event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.last_event << std::dec;
 
     if (!sdk::is_loading()) {
         const auto entity_list = sdk::EntityList::get();
@@ -376,6 +386,123 @@ void TestBot::find_xrefs(uintptr_t target, uintptr_t window) {
     }
 
     finish("ok xref (" + std::to_string(hits.size()) + " hits)");
+}
+
+// Research helpers in the style of Cheat Engine, over the writable sections of the exe (globals):
+// snap <name> keeps a copy; filter <name> <rule> narrows the candidate bytes ("=N" equal to N, "!=N",
+// "same:<other snapshot>", "diff:<other snapshot>"); the first filter starts from every byte; filter reset clears.
+void TestBot::take_snapshot(const std::string& name) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+    Snapshot snapshot{};
+
+    for (auto i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if ((section->Characteristics & IMAGE_SCN_MEM_WRITE) == 0) {
+            continue;
+        }
+
+        const auto start = (const uint8_t*)(base + section->VirtualAddress);
+        snapshot.ranges.push_back({section->VirtualAddress, std::vector<uint8_t>(start, start + section->Misc.VirtualSize)});
+    }
+
+    size_t bytes{0};
+
+    for (const auto& range : snapshot.ranges) {
+        bytes += range.second.size();
+    }
+
+    m_snapshots[name] = std::move(snapshot);
+    finish("ok snap " + name + " (" + std::to_string(bytes) + " bytes)");
+}
+
+void TestBot::filter_candidates(const std::string& name, const std::string& rule) {
+    if (name == "reset") {
+        m_candidates.clear();
+        m_candidates_started = false;
+        finish("ok filter reset");
+        return;
+    }
+
+    const auto it = m_snapshots.find(name);
+
+    if (it == m_snapshots.end()) {
+        finish("error filter: no snapshot " + name);
+        return;
+    }
+
+    const Snapshot* other{};
+
+    if (rule.starts_with("same:") || rule.starts_with("diff:")) {
+        const auto other_it = m_snapshots.find(rule.substr(5));
+
+        if (other_it == m_snapshots.end()) {
+            finish("error filter: no snapshot " + rule.substr(5));
+            return;
+        }
+
+        other = &other_it->second;
+    }
+
+    const auto value_of = [](const Snapshot& snapshot, uint32_t rva) -> int {
+        for (const auto& [start, bytes] : snapshot.ranges) {
+            if (rva >= start && rva < start + bytes.size()) {
+                return bytes[rva - start];
+            }
+        }
+
+        return -1;
+    };
+
+    const auto keep = [&](uint32_t rva, uint8_t value) {
+        if (rule.starts_with("!=")) {
+            return value != (uint8_t)std::stoi(rule.substr(2));
+        }
+
+        if (rule.starts_with("=")) {
+            return value == (uint8_t)std::stoi(rule.substr(1));
+        }
+
+        const auto other_value = value_of(*other, rva);
+        return rule.starts_with("same:") ? other_value == value : other_value != value;
+    };
+
+    std::vector<uint32_t> result{};
+
+    if (!m_candidates_started) {
+        for (const auto& [start, bytes] : it->second.ranges) {
+            for (uint32_t i = 0; i < bytes.size(); ++i) {
+                if (keep(start + i, bytes[i])) {
+                    result.push_back(start + i);
+                }
+            }
+        }
+
+        m_candidates_started = true;
+    } else {
+        for (const auto rva : m_candidates) {
+            const auto value = value_of(it->second, rva);
+
+            if (value >= 0 && keep(rva, (uint8_t)value)) {
+                result.push_back(rva);
+            }
+        }
+    }
+
+    m_candidates = std::move(result);
+    finish("ok filter " + name + " " + rule + ": " + std::to_string(m_candidates.size()) + " candidates");
+}
+
+void TestBot::list_candidates(size_t count) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+
+    for (size_t i = 0; i < m_candidates.size() && i < count; ++i) {
+        std::ostringstream line{};
+        line << "cand +0x" << std::hex << m_candidates[i] << " now=" << std::dec << (int)*(const uint8_t*)(base + m_candidates[i]);
+        finish(line.str());
+    }
+
+    finish("ok cands (" + std::to_string(m_candidates.size()) + ")");
 }
 
 // Copies the back buffer before the mod's own UI is drawn on it and writes a 32-bit BMP.

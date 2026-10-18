@@ -3,6 +3,7 @@
   python tools/qa/bot.py start [slot]            launch the test copy, wait for the bot
   python tools/qa/bot.py cmd [slot] "pad A 100" "wait 2000" "shot title" ...
   python tools/qa/bot.py load [slot] [save]      from the title screen into the world of save N (0 = top)
+  python tools/qa/bot.py chapter [slot] <save> <chapter> <segment> [2B|9S]   Chapter Select (0-based), into the world
   python tools/qa/bot.py stop [slot]             kill the test copy, then check isolation
   python tools/qa/bot.py check [slot]            isolation check only
 
@@ -182,6 +183,46 @@ def load(slot, save_index, timeout=240):
     return False
 
 
+def to_start_menu(slot, save_index, timeout=180):
+    """From the title screen to the Start Menu of save N (Start Game / Chapter Select)."""
+    actions = {
+        "title": ["pad A 150", "wait 2500"],
+        "main_menu": ["pad A 150", "wait 2500"],
+        "load_game": ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index + ["pad A 150", "wait 1500"],
+        "confirm_load": ["pad LEFT 120", "pad A 150", "wait 5000"],
+    }
+    end = time.time() + timeout
+    while time.time() < end:
+        name = screen(slot)
+        if name == "start_menu":
+            return True
+        cmd(slot, actions.get(name, ["wait 2000"]), quiet=True)
+    return False
+
+
+def chapter(slot, save_index, chapter_index, segment_index, character="2B", timeout=180):
+    """Chapter Select on a finished save: chapter N (0 = Prologue), segment M (0 = first), as 2B or 9S,
+    then wait until the player is in the world. Works on a fresh start (the list cursor is at the top)."""
+    if not to_start_menu(slot, save_index):
+        print(f"{slot}: RESULT: FAIL no Start Menu")
+        return False
+    cmd(slot, ["wait 1500", "pad DOWN 120", "wait 500", "pad A 150", "wait 2500"]  # Chapter Select (the menu needs a moment)
+        + ["pad DOWN 120"] * chapter_index + ["pad A 150", "wait 1000"]  # expand the chapter
+        + ["pad DOWN 120"] * (segment_index + 1) + ["pad A 150", "wait 1000"]  # the segment: 2B / 9S popup
+        + (["pad DOWN 120"] if character == "9S" else []) + ["pad A 150", "wait 1000"]
+        + ["pad LEFT 120", "pad A 150", "wait 5000"], quiet=True)  # Begin? Yes
+    end = time.time() + timeout
+    while time.time() < end:
+        state = player_state(slot)
+        if state:
+            print(f"{slot}: {state}")
+            return True
+        cmd(slot, ["wait 3000"], quiet=True)
+    cmd(slot, ["shot chapter_failed"])
+    print(f"{slot}: RESULT: FAIL the player did not appear after Chapter Select")
+    return False
+
+
 def check(slot):
     root = slot_dir(slot)
     ok = True
@@ -226,4 +267,5 @@ if __name__ == "__main__":
     slot = rest.pop(0) if rest and rest[0].startswith("slot") else "slot1"
     {"start": lambda: start(slot), "cmd": lambda: cmd(slot, rest),
      "load": lambda: load(slot, int(rest[0]) if rest else 0),
+     "chapter": lambda: chapter(slot, int(rest[0]), int(rest[1]), int(rest[2]), rest[3] if len(rest) > 3 else "2B"),
      "stop": lambda: stop(slot), "check": lambda: check(slot)}[action]()
