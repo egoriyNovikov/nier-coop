@@ -35,6 +35,8 @@
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
 //   watch <hex rva> [1|2|4|8|x] hardware breakpoint (up to 4) on writes to exe memory, or x = on executing code; "watch off" clears
+//   entities [radius]            entities near the player: name, model, handle, position, distance (nearest first)
+//   goto <x> <y> <z> [yaw]       teleport the character we control (Pl0000.setPosRotResetHap), yaw in degrees (0 = +z)
 //   hits                         what watch caught: instruction, call stack (exe rvas), value after the write / rcx rdx r8 r9
 class TestBot : public Mod {
 public:
@@ -54,6 +56,7 @@ private:
         std::string arg1{};
         std::string arg2{};
         std::string arg3{};
+        std::string arg4{};
     };
 
     void bot_thread();
@@ -71,6 +74,7 @@ private:
     void clear_watches();
     void arm_threads();
     void list_hits();
+    void list_entities(float radius);
     static LONG WINAPI on_exception(EXCEPTION_POINTERS* info);
 
     struct Watch {

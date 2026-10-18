@@ -14,6 +14,7 @@
 #include <sdk/Entity.hpp>
 #include <sdk/EntityList.hpp>
 #include <sdk/Game.hpp>
+#include <sdk/Pl0000.hpp>
 #include <sdk/Story.hpp>
 
 #include "../AutomataMP.hpp"
@@ -191,7 +192,7 @@ void TestBot::read_commands() {
         Command command{};
         command.text = line;
         std::istringstream words{line};
-        words >> command.verb >> command.arg1 >> command.arg2 >> command.arg3;
+        words >> command.verb >> command.arg1 >> command.arg2 >> command.arg3 >> command.arg4;
         m_queue.push_back(command);
     }
 
@@ -289,6 +290,21 @@ void TestBot::start(const Command& command) {
                 clear_watches();
             } else {
                 add_watch(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 8 : command.arg2 == "x" ? 0 : std::stoul(command.arg2));
+            }
+        } else if (command.verb == "entities") {
+            list_entities(command.arg1.empty() ? 50.0f : std::stof(command.arg1));
+        } else if (command.verb == "goto") {
+            const auto entity_list = sdk::EntityList::get();
+            const auto player = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+            if (player == nullptr || player->behavior == nullptr) {
+                finish("error goto: no character");
+            } else {
+                const Vector4f target{std::stof(command.arg1), std::stof(command.arg2), std::stof(command.arg3), 1.0f};
+                // Optional yaw in degrees around the up axis (0 = +z).
+                const auto yaw = command.arg4.empty() ? 0.0f : glm::radians(std::stof(command.arg4));
+                player->behavior->as<sdk::Pl0000>()->setPosRotResetHap(target, glm::angleAxis(yaw, glm::vec3{0.0f, 1.0f, 0.0f}));
+                finish("ok " + command.text);
             }
         } else if (command.verb == "hits") {
             list_hits();
@@ -708,6 +724,49 @@ LONG WINAPI TestBot::on_exception(EXCEPTION_POINTERS* info) {
     }
 
     return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// Research helper: what is around the player (NPCs, triggers with a behavior, enemies), nearest first.
+void TestBot::list_entities(float radius) {
+    const auto entity_list = sdk::EntityList::get();
+    const auto player = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (player == nullptr || player->behavior == nullptr) {
+        finish("error entities: no character");
+        return;
+    }
+
+    const auto origin = player->behavior->position();
+    std::vector<std::pair<float, std::string>> found{};
+
+    for (size_t i = 0; i < entity_list->size(); ++i) {
+        const auto entity = entity_list->get((uint32_t)i);
+
+        if (entity == nullptr || entity->behavior == nullptr) {
+            continue;
+        }
+
+        const auto p = entity->behavior->position();
+        const auto distance = glm::length(p - origin);
+
+        if (distance > radius) {
+            continue;
+        }
+
+        std::ostringstream line{};
+        line << "entity " << std::string{entity->name, strnlen(entity->name, sizeof(entity->name))} << " model=" << std::hex
+             << (uint32_t)entity->behavior->model_index() << " handle=" << entity->handle << std::dec << " pos=" << p.x << ","
+             << p.y << "," << p.z << " distance=" << distance;
+        found.emplace_back(distance, line.str());
+    }
+
+    std::sort(found.begin(), found.end());
+
+    for (size_t i = 0; i < found.size() && i < 500; ++i) {
+        finish(found[i].second);
+    }
+
+    finish("ok entities (" + std::to_string(found.size()) + ")");
 }
 
 // Consecutive hits with the same stack are printed once with a count and the value after the last of them.
