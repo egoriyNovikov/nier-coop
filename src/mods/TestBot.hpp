@@ -23,6 +23,9 @@
 //   wait <ms>
 //   shot <name>                  screenshot of the game frame to shots\<name>.bmp (rendered by the game, not the desktop)
 //   state                        loading flag, player position
+//   read <hex rva> <hex length>  hex dump of the exe's memory (research)
+//   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
+//   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
 class TestBot : public Mod {
 public:
     std::string_view get_name() const override {
@@ -47,6 +50,8 @@ private:
     void start(const Command& command);
     void finish(const std::string& line);
     void take_screenshot(const std::string& name);
+    void scan_strings(const std::string& pattern);
+    void find_xrefs(uintptr_t target, uintptr_t window);
     std::string describe_state();
 
     std::deque<Command> m_queue{};

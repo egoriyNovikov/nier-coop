@@ -1,5 +1,7 @@
 #include <atomic>
 #include <cmath>
+#include <iomanip>
+#include <regex>
 #include <sstream>
 #include <unordered_map>
 
@@ -10,6 +12,7 @@
 #include <sdk/Entity.hpp>
 #include <sdk/EntityList.hpp>
 #include <sdk/Game.hpp>
+#include <sdk/Story.hpp>
 
 #include "../AutomataMP.hpp"
 #include "../TestMode.hpp"
@@ -192,6 +195,31 @@ void TestBot::start(const Command& command) {
             take_screenshot(command.arg1.empty() ? "shot" : command.arg1);
         } else if (command.verb == "state") {
             finish(describe_state());
+        } else if (command.verb == "read") {
+            // read <hex rva> <hex length>: hex dump of the exe's memory, 16 bytes per line.
+            const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+            const auto rva = std::stoull(command.arg1, nullptr, 16);
+            const auto length = std::min<uint64_t>(std::stoull(command.arg2, nullptr, 16), 0x1000);
+
+            for (uint64_t offset = 0; offset < length; offset += 16) {
+                std::ostringstream line{};
+                line << "mem +0x" << std::hex << rva + offset << " ";
+                std::string text{};
+
+                for (auto k = 0; k < 16; ++k) {
+                    const auto b = *(const uint8_t*)(base + rva + offset + k);
+                    line << std::setw(2) << std::setfill('0') << (int)b << " ";
+                    text += (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                }
+
+                finish(line.str() + text);
+            }
+
+            finish("ok " + command.text);
+        } else if (command.verb == "xref") {
+            find_xrefs(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 0 : std::stoull(command.arg2, nullptr, 16));
+        } else if (command.verb == "scan") {
+            scan_strings(command.text.substr(command.text.find(' ') + 1));
         } else {
             finish("error unknown command: " + command.text);
         }
@@ -207,7 +235,7 @@ void TestBot::finish(const std::string& line) {
 
 std::string TestBot::describe_state() {
     std::ostringstream s{};
-    s << "state loading=" << sdk::is_loading();
+    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id();
 
     if (!sdk::is_loading()) {
         const auto entity_list = sdk::EntityList::get();
@@ -222,6 +250,94 @@ std::string TestBot::describe_state() {
     }
 
     return s.str();
+}
+
+// Research helper: ASCII strings (8+ chars) in the writable sections of the exe that match a regex,
+// with their offset from the exe base ("scan ^\d+_\d*_?[ABC]+_" finds phase names like 00_85_A_RobotM_Pro_2ndArea).
+void TestBot::scan_strings(const std::string& pattern) {
+    const std::regex re{pattern};
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+    size_t hits{0};
+
+    for (auto i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if ((section->Characteristics & IMAGE_SCN_MEM_WRITE) == 0) {
+            continue;
+        }
+
+        const auto start = (const char*)(base + section->VirtualAddress);
+        const auto size = (size_t)section->Misc.VirtualSize;
+
+        for (size_t j = 0; j < size;) {
+            size_t length{0};
+
+            while (j + length < size && start[j + length] >= 0x20 && start[j + length] < 0x7F) {
+                ++length;
+            }
+
+            if (length >= 8 && start[j + length] == '\0') {
+                const std::string s{start + j, length};
+
+                if (std::regex_search(s, re) && hits++ < 50) {
+                    std::ostringstream line{};
+                    line << "found +0x" << std::hex << (section->VirtualAddress + j) << " " << s;
+                    finish(line.str());
+                }
+            }
+
+            j += length + 1;
+        }
+    }
+
+    finish("ok scan " + pattern + " (" + std::to_string(hits) + " hits)");
+}
+
+// Research helper: code in the exe that addresses [target - window, target] RIP-relatively (the field may sit
+// inside a global struct). Works on the decrypted code in memory (on disk .text is encrypted by SteamStub).
+// Prints "xref +0x<instruction> -> +0x<address> (<first bytes>)", nearest addresses first, at most 40.
+void TestBot::find_xrefs(uintptr_t target, uintptr_t window) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    auto section = IMAGE_FIRST_SECTION(nt);
+    std::vector<std::pair<uintptr_t, uintptr_t>> hits{}; // instruction rva, referenced rva
+
+    for (auto i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0) {
+            continue;
+        }
+
+        const auto start = base + section->VirtualAddress;
+
+        for (size_t j = 0; j + 4 <= section->Misc.VirtualSize; ++j) {
+            const auto disp = *(const int32_t*)(start + j);
+
+            // The displacement is followed by nothing, an imm8 or an imm32.
+            for (const auto extra : {0, 1, 4}) {
+                const auto referenced = section->VirtualAddress + j + 4 + extra + (intptr_t)disp;
+
+                if (referenced <= target && referenced + window >= target) {
+                    hits.emplace_back(section->VirtualAddress + j, referenced);
+                }
+            }
+        }
+    }
+
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    for (size_t i = 0; i < hits.size() && i < 40; ++i) {
+        std::ostringstream line{};
+        line << "xref +0x" << std::hex << hits[i].first << " -> +0x" << hits[i].second << " (";
+
+        for (auto k = 0; k < 12; ++k) {
+            line << std::setw(2) << std::setfill('0') << (int)*(const uint8_t*)(base + hits[i].first - 4 + k) << (k == 3 ? "|" : " ");
+        }
+
+        line << ")";
+        finish(line.str());
+    }
+
+    finish("ok xref (" + std::to_string(hits.size()) + " hits)");
 }
 
 // Copies the back buffer before the mod's own UI is drawn on it and writes a 32-bit BMP.

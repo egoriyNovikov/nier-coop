@@ -2,6 +2,7 @@
 
   python tools/qa/bot.py start [slot]            launch the test copy, wait for the bot
   python tools/qa/bot.py cmd [slot] "pad A 100" "wait 2000" "shot title" ...
+  python tools/qa/bot.py load [slot] [save]      from the title screen into the world of save N (0 = top)
   python tools/qa/bot.py stop [slot]             kill the test copy, then check isolation
   python tools/qa/bot.py check [slot]            isolation check only
 
@@ -98,6 +99,23 @@ def cmd(slot, commands):
         print(f"timeout: {len(lines)} of {len(commands)} commands finished")
 
 
+def load(slot, save_index):
+    """Title screen -> Continue -> save N (0 = top) -> Yes -> Start Game, then wait for the player."""
+    root = slot_dir(slot)
+    cmd(slot, ["wait 15000", "pad A 150", "wait 3000", "pad A 150", "wait 3000"]
+        + ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index
+        + ["pad A 150", "wait 1500", "pad LEFT 120", "pad A 150", "wait 20000", "pad A 150"])
+    for _ in range(30):
+        before = len(out_lines(root))
+        cmd(slot, ["wait 3000", "state"])
+        state = out_lines(root)[before:][-1]
+        if "player=" in state and "player=none" not in state:
+            print("RESULT: PASS loaded")
+            return
+    cmd(slot, ["shot load_failed"])
+    print("RESULT: FAIL the player did not appear")
+
+
 def check(slot):
     root = slot_dir(slot)
     ok = True
@@ -134,4 +152,5 @@ if __name__ == "__main__":
     rest = sys.argv[2:]
     slot = rest.pop(0) if rest and rest[0].startswith("slot") else "slot1"
     {"start": lambda: start(slot), "cmd": lambda: cmd(slot, rest),
+     "load": lambda: load(slot, int(rest[0]) if rest else 0),
      "stop": lambda: stop(slot), "check": lambda: check(slot)}[action]()
