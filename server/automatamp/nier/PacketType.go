@@ -26,7 +26,8 @@ const (
 	PacketTypeID_BUTTONS                PacketType = 4100
 	PacketTypeID_ENEMY_DIED             PacketType = 4101
 	PacketTypeID_LOG_CHUNK              PacketType = 4102
-	PacketTypeID_CLIENT_END             PacketType = 4103
+	PacketTypeID_STORY_STATE            PacketType = 4103
+	PacketTypeID_CLIENT_END             PacketType = 4104
 	PacketTypeID_PING                   PacketType = 32768
 	PacketTypeID_PONG                   PacketType = 32769
 	PacketTypeID_HELLO                  PacketType = 32770
@@ -53,6 +54,7 @@ var EnumNamesPacketType = map[PacketType]string{
 	PacketTypeID_BUTTONS:                "ID_BUTTONS",
 	PacketTypeID_ENEMY_DIED:             "ID_ENEMY_DIED",
 	PacketTypeID_LOG_CHUNK:              "ID_LOG_CHUNK",
+	PacketTypeID_STORY_STATE:            "ID_STORY_STATE",
 	PacketTypeID_CLIENT_END:             "ID_CLIENT_END",
 	PacketTypeID_PING:                   "ID_PING",
 	PacketTypeID_PONG:                   "ID_PONG",
@@ -80,6 +82,7 @@ var EnumValuesPacketType = map[string]PacketType{
 	"ID_BUTTONS":                PacketTypeID_BUTTONS,
 	"ID_ENEMY_DIED":             PacketTypeID_ENEMY_DIED,
 	"ID_LOG_CHUNK":              PacketTypeID_LOG_CHUNK,
+	"ID_STORY_STATE":            PacketTypeID_STORY_STATE,
 	"ID_CLIENT_END":             PacketTypeID_CLIENT_END,
 	"ID_PING":                   PacketTypeID_PING,
 	"ID_PONG":                   PacketTypeID_PONG,

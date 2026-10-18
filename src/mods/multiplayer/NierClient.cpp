@@ -16,6 +16,7 @@
 
 #include "schema/Packets_generated.h"
 #include "mods/AutomataMPMod.hpp"
+#include "StoryWatcher.hpp"
 #include "NierClient.hpp"
 
 using namespace std;
@@ -407,6 +408,7 @@ void NierClient::think() {
     }
 
     send_log_copy();
+    send_story_state();
 
     // Joined while not in the world, or came back from a loading screen:
     // let the others know about the enemies around us.
@@ -722,6 +724,13 @@ void NierClient::on_player_packet_received(nier::PacketType packet_type, const n
     case nier::PacketType_ID_BUTTONS: {
         if (!handle_buttons(packet)) {
             spdlog::debug("Failed to handle buttons");
+        }
+
+        break;
+    }
+    case nier::PacketType_ID_STORY_STATE: {
+        if (!handle_story_state(packet)) {
+            spdlog::debug("Failed to handle story state");
         }
 
         break;
@@ -1929,6 +1938,67 @@ bool NierClient::handle_buttons(const nier::PlayerPacket* packet) {
         }
     }
 
+    return true;
+}
+
+// Our story point, when it changes and every few seconds (a player who joins later gets it too).
+void NierClient::send_story_state() {
+    constexpr auto RESEND = std::chrono::seconds{5};
+    const auto point = StoryWatcher::get().current();
+    const auto now = std::chrono::steady_clock::now();
+
+    if (point == m_sent_story && now < m_next_story_send) {
+        return;
+    }
+
+    flatbuffers::FlatBufferBuilder builder(0);
+    const auto phase = builder.CreateString(point.phase);
+    nier::StoryStateBuilder data_builder(builder);
+    data_builder.add_phase(phase);
+    data_builder.add_phase_id(point.phase_id);
+    data_builder.add_scene_state_changes(point.scene_state_changes);
+    builder.Finish(data_builder.Finish());
+
+    send_packet(nier::PacketType_ID_STORY_STATE, builder.GetBufferPointer(), builder.GetSize());
+    m_sent_story = point;
+    m_next_story_send = now + RESEND;
+}
+
+bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
+    if (packet->guid() == m_guid || packet->data() == nullptr) {
+        return false;
+    }
+
+    flatbuffers::Verifier verifier{packet->data()->data(), packet->data()->size()};
+
+    if (!verifier.VerifyBuffer<nier::StoryState>(nullptr)) {
+        spdlog::error("[Story] Invalid story state from {}", packet->guid());
+        return false;
+    }
+
+    const auto data = flatbuffers::GetRoot<nier::StoryState>(packet->data()->data());
+
+    std::scoped_lock _{m_players_mutex};
+    const auto it = m_players.find(packet->guid());
+
+    if (it == m_players.end() || it->second == nullptr) {
+        return false;
+    }
+
+    auto& player = *it->second;
+    Player::Story story{};
+    story.phase = data->phase() != nullptr ? data->phase()->str() : "";
+    story.phase_id = data->phase_id();
+    story.scene_state_changes = data->scene_state_changes();
+    story.known = true;
+
+    if (story.phase != player.get_story().phase || story.phase_id != player.get_story().phase_id) {
+        const auto ours = StoryWatcher::get().current();
+        spdlog::info("[Story] {} is in phase {} ({}), we are in {} ({}){}", player.get_name(), story.phase, story.phase_id,
+            ours.phase, ours.phase_id, story.phase == ours.phase ? "" : ": different phases");
+    }
+
+    player.set_story(story);
     return true;
 }
 

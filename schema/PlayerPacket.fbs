@@ -29,6 +29,13 @@ struct EnemyDied {
     position: nier.Vector3f;
 }
 
+// Where the sender's game is in the story (src/mods/multiplayer/StoryWatcher.hpp).
+table StoryState {
+    phase: string; // e.g. "16_AB_bunker_Order"
+    phase_id: int;
+    scene_state_changes: uint; // story flags changed since the sender's game started
+}
+
 table Buttons {
     buttons: [uint]; // 8 buttons
 }

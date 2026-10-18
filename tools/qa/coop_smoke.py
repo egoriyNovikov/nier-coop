@@ -121,6 +121,13 @@ def scenario(args, expect):
         expect(distance is not None and distance < 3.0,
                f"{viewer} sees {other} where {other} is (distance {distance if distance is None else round(distance, 2)} m)")
     expect(parse(host_state, "phase") == parse(client_state, "phase"), "both games are in the same phase")
+    # ID_STORY_STATE (TASKS 2.6): each game knows the other's phase. Sent every 5 s, so ask again after that.
+    host_coop = bot.cmd(HOST, ["wait 6000", "coop"], quiet=True)[-1]
+    client_coop = bot.cmd(CLIENT, ["coop"], quiet=True)[-1]
+    expect(parse(host_coop, "other_story") == parse(client_state, "phase"),
+           f"the host knows the client's phase ({parse(host_coop, 'other_story')})")
+    expect(parse(client_coop, "other_story") == parse(host_state, "phase"),
+           f"the client knows the host's phase ({parse(client_coop, 'other_story')})")
     # Concept 5.1, route A: the host plays 2B (10000), the client takes over the story buddy 9S (10200).
     expect(parse(host_state, "model") == "10000", f"the host plays 2B (model {parse(host_state, 'model')})")
     expect(parse(client_state, "model") == "10200", f"the client plays 9S (model {parse(client_state, 'model')})")

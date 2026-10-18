@@ -29,6 +29,7 @@ enum PacketType : uint {
     ID_BUTTONS,
     ID_ENEMY_DIED, // An enemy of the sender's own story died (EnemyDied).
     ID_LOG_CHUNK, // Lines of the sender's log file as raw text, the server stores them and does not forward.
+    ID_STORY_STATE, // Where the sender's game is in the story (StoryState), on change and every few seconds.
     ID_CLIENT_END,
 
     ID_PING = 32768,

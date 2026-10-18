@@ -19,6 +19,7 @@
 #include "AutomataMPMod.hpp"
 #include "Version.hpp"
 #include "multiplayer/ScriptTracer.hpp"
+#include "multiplayer/StoryWatcher.hpp"
 
 using namespace std;
 
@@ -236,6 +237,12 @@ std::string AutomataMPMod::describe_coop() {
         return s.str();
     }
 
+    s << " story=" << StoryWatcher::get().current().phase;
+
+    for (const auto& [name, story] : m_client->get_other_stories()) {
+        s << " other_story=" << (story.known ? story.phase : "unknown");
+    }
+
     s << " connected=" << m_client->is_connected() << " session=" << m_client->is_in_session()
       << " in_world=" << m_client->is_in_world() << " master=" << m_client->is_master_client()
       << " guid=" << m_client->get_guid();
@@ -419,6 +426,22 @@ void AutomataMPMod::display_coop() {
 
     ImGui::TextWrapped("Status: %s", m_coop_status.empty() ? "Disconnected" : m_coop_status.c_str());
 
+    // Story point of both games (TASKS 2.6.3): a different phase means the games went apart.
+    const auto ours = StoryWatcher::get().current();
+    ImGui::TextWrapped("Story: we are in %s", ours.phase.empty() ? "(unknown)" : ours.phase.c_str());
+
+    if (m_client != nullptr) {
+        for (const auto& [name, story] : m_client->get_other_stories()) {
+            if (!story.known) {
+                ImGui::TextWrapped("Story: %s (no data yet)", name.c_str());
+            } else if (story.phase != ours.phase) {
+                ImGui::TextColored(ImVec4{1.0f, 0.6f, 0.2f, 1.0f}, "Story: %s is in %s (different phase)", name.c_str(), story.phase.c_str());
+            } else {
+                ImGui::TextWrapped("Story: %s is in the same phase", name.c_str());
+            }
+        }
+    }
+
     const auto busy = m_client != nullptr || m_pending_connect.has_value();
 
     if (busy) {
@@ -567,6 +590,7 @@ void AutomataMPMod::on_think() {
     std::scoped_lock _{m_client_mutex};
 
     m_last_think = std::chrono::steady_clock::now();
+    StoryWatcher::get().update();
 
     if (m_wants_destroy_client) {
         if (m_client != nullptr) {

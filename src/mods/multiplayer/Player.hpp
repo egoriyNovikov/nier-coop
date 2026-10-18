@@ -66,6 +66,18 @@ public:
 
     sdk::Pl0000* get_entity();
 
+    // Where this player's game is in the story (ID_STORY_STATE).
+    struct Story {
+        std::string phase{};
+        int32_t phase_id{-1};
+        uint32_t scene_state_changes{0};
+        bool known{false};
+    };
+
+    const Story& get_story() const { return m_story; }
+
+    void set_story(const Story& story) { m_story = story; }
+
 private:
     std::string m_name{};
     uint64_t m_guid{};
@@ -76,6 +88,7 @@ private:
     bool m_is_master_client{false};
     bool m_has_player_data{false};
     bool m_data_stale{false};
+    Story m_story{};
     std::chrono::steady_clock::time_point m_last_data_time{};
     nier::PlayerData m_player_data;
 };

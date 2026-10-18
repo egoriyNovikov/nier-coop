@@ -40,6 +40,9 @@ struct AnimationStart;
 
 struct EnemyDied;
 
+struct StoryState;
+struct StoryStateBuilder;
+
 struct Buttons;
 struct ButtonsBuilder;
 
@@ -73,7 +76,8 @@ enum PacketType : uint32_t {
   PacketType_ID_BUTTONS = 4100,
   PacketType_ID_ENEMY_DIED = 4101,
   PacketType_ID_LOG_CHUNK = 4102,
-  PacketType_ID_CLIENT_END = 4103,
+  PacketType_ID_STORY_STATE = 4103,
+  PacketType_ID_CLIENT_END = 4104,
   PacketType_ID_PING = 32768,
   PacketType_ID_PONG = 32769,
   PacketType_ID_HELLO = 32770,
@@ -82,7 +86,7 @@ enum PacketType : uint32_t {
   PacketType_MAX = PacketType_ID_WELCOME
 };
 
-inline const PacketType (&EnumValuesPacketType())[24] {
+inline const PacketType (&EnumValuesPacketType())[25] {
   static const PacketType values[] = {
     PacketType_ID_MASTER_CLIENT_START,
     PacketType_ID_SPAWN_ENTITY,
@@ -103,6 +107,7 @@ inline const PacketType (&EnumValuesPacketType())[24] {
     PacketType_ID_BUTTONS,
     PacketType_ID_ENEMY_DIED,
     PacketType_ID_LOG_CHUNK,
+    PacketType_ID_STORY_STATE,
     PacketType_ID_CLIENT_END,
     PacketType_ID_PING,
     PacketType_ID_PONG,
@@ -133,6 +138,7 @@ inline const char *EnumNamePacketType(PacketType e) {
     case PacketType_ID_BUTTONS: return "ID_BUTTONS";
     case PacketType_ID_ENEMY_DIED: return "ID_ENEMY_DIED";
     case PacketType_ID_LOG_CHUNK: return "ID_LOG_CHUNK";
+    case PacketType_ID_STORY_STATE: return "ID_STORY_STATE";
     case PacketType_ID_CLIENT_END: return "ID_CLIENT_END";
     case PacketType_ID_PING: return "ID_PING";
     case PacketType_ID_PONG: return "ID_PONG";
@@ -170,7 +176,7 @@ inline const char *EnumNameVersionMajor(VersionMajor e) {
 }
 
 enum VersionMinor : uint32_t {
-  VersionMinor_Value = 1,
+  VersionMinor_Value = 2,
   VersionMinor_MIN = VersionMinor_Value,
   VersionMinor_MAX = VersionMinor_Value
 };
@@ -1163,6 +1169,81 @@ inline flatbuffers::Offset<EntitySpawnParams> CreateEntitySpawnParamsDirect(
       model,
       model2,
       positional);
+}
+
+struct StoryState FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef StoryStateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PHASE = 4,
+    VT_PHASE_ID = 6,
+    VT_SCENE_STATE_CHANGES = 8
+  };
+  const flatbuffers::String *phase() const {
+    return GetPointer<const flatbuffers::String *>(VT_PHASE);
+  }
+  int32_t phase_id() const {
+    return GetField<int32_t>(VT_PHASE_ID, 0);
+  }
+  uint32_t scene_state_changes() const {
+    return GetField<uint32_t>(VT_SCENE_STATE_CHANGES, 0);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PHASE) &&
+           verifier.VerifyString(phase()) &&
+           VerifyField<int32_t>(verifier, VT_PHASE_ID) &&
+           VerifyField<uint32_t>(verifier, VT_SCENE_STATE_CHANGES) &&
+           verifier.EndTable();
+  }
+};
+
+struct StoryStateBuilder {
+  typedef StoryState Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_phase(flatbuffers::Offset<flatbuffers::String> phase) {
+    fbb_.AddOffset(StoryState::VT_PHASE, phase);
+  }
+  void add_phase_id(int32_t phase_id) {
+    fbb_.AddElement<int32_t>(StoryState::VT_PHASE_ID, phase_id, 0);
+  }
+  void add_scene_state_changes(uint32_t scene_state_changes) {
+    fbb_.AddElement<uint32_t>(StoryState::VT_SCENE_STATE_CHANGES, scene_state_changes, 0);
+  }
+  explicit StoryStateBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<StoryState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<StoryState>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<StoryState> CreateStoryState(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<flatbuffers::String> phase = 0,
+    int32_t phase_id = 0,
+    uint32_t scene_state_changes = 0) {
+  StoryStateBuilder builder_(_fbb);
+  builder_.add_scene_state_changes(scene_state_changes);
+  builder_.add_phase_id(phase_id);
+  builder_.add_phase(phase);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<StoryState> CreateStoryStateDirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    const char *phase = nullptr,
+    int32_t phase_id = 0,
+    uint32_t scene_state_changes = 0) {
+  auto phase__ = phase ? _fbb.CreateString(phase) : 0;
+  return nier::CreateStoryState(
+      _fbb,
+      phase__,
+      phase_id,
+      scene_state_changes);
 }
 
 struct Buttons FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {

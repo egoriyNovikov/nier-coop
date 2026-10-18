@@ -10,6 +10,7 @@
 #include <enetpp/client.h>
 
 #include "Player.hpp"
+#include "StoryWatcher.hpp"
 #include "EnemyDeathSync.hpp"
 #include "EntitySync.hpp"
 #include "schema/Packets_generated.h"
@@ -92,6 +93,20 @@ public:
         return m_is_master_client;
     }
 
+    // Name and story point of every other player, safe from any thread.
+    std::vector<std::pair<std::string, Player::Story>> get_other_stories() {
+        std::scoped_lock _{m_players_mutex};
+        std::vector<std::pair<std::string, Player::Story>> result{};
+
+        for (const auto& [guid, player] : m_players) {
+            if (player != nullptr && guid != m_guid) {
+                result.emplace_back(player->get_name(), player->get_story());
+            }
+        }
+
+        return result;
+    }
+
     const auto& get_players() const {
         return m_players;
     }
@@ -133,8 +148,10 @@ private:
     bool handle_animation_start(const nier::PlayerPacket* packet);
     bool handle_buttons(const nier::PlayerPacket* packet);
     bool handle_enemy_died(const nier::PlayerPacket* packet);
+    bool handle_story_state(const nier::PlayerPacket* packet);
 
     void send_enemy_died(const EnemyDeathSync::Death& death);
+    void send_story_state();
     // Sends what was added to our log file since the last call, when the server keeps a copy of it.
     void send_log_copy();
     // Game thread. Tracks our enemies, sends their deaths, applies the deaths from the other game.
@@ -165,6 +182,9 @@ private:
 
     EnemyDeathSync m_enemy_deaths{};
     // Deaths from the other game, applied in think() on the game thread.
+    StoryWatcher::Point m_sent_story{};
+    std::chrono::steady_clock::time_point m_next_story_send{};
+
     std::mutex m_remote_deaths_mutex{};
     std::vector<EnemyDeathSync::Death> m_remote_deaths{};
     std::chrono::steady_clock::time_point m_next_enemy_stats_log{};
