@@ -11,6 +11,11 @@ namespace sdk {
 std::string get_phase_name();
 // The int32 right before the name. The game compares it with 0x100; meaning unknown.
 int32_t get_phase_id();
+// Story step inside the phase: an int32 global the game resets to -1 when a phase starts (+0x9c5a00) and
+// raises as the story goes on. Found 2026-10-18 on build 7020666 (+0x14952c8): on the "Test" save in
+// 16_AB_bunker_Order it is 130 and the conversation with the Commander makes it 140. The game writes it
+// from a pending value of a manager object ([obj+0x650], flag [obj+0x654], +0x9480b6). -2 if not found.
+int32_t get_phase_step();
 
 // Route of the story: 'A', 'B' or 'C', 0 if unknown. The game keeps it as the scene state flags "Route/A",
 // "Route/B", "Route/C" (Chapter Select sets one of them, build 7020666: +0x95cd65). Game thread only.

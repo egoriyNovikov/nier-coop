@@ -49,6 +49,24 @@ int32_t get_phase_id() {
     const auto phase = get_phase_global();
     return phase != nullptr ? phase->id : -1;
 }
+
+int32_t get_phase_step() {
+    static const auto step = []() -> int32_t* {
+        // mov [rcx+98h], eax; mov [step], eax; mov [rdi+654h], ebp (the game applies a pending step, +0x9480b0 on 7020666)
+        const auto code = utility::scan(utility::get_executable(), "89 81 98 00 00 00 89 05 ? ? ? ? 89 af 54 06 00 00");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the phase step global");
+            return nullptr;
+        }
+
+        const auto address = utility::calculate_absolute(*code + 8);
+        spdlog::info("[Story] Phase step global: {:x}", address);
+        return (int32_t*)address;
+    }();
+
+    return step != nullptr ? *step : -2;
+}
 }
 
 namespace sdk {

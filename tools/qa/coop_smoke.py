@@ -5,7 +5,8 @@
 1. Builds the mod and the server, installs them into .testinstall/slot1 (host) and slot2 (client).
 2. Both copies load a save through the test bot (together: both the "Test" save at the Bunker;
    diverged: the host the "Test" save, the client the finished save at the Resistance Camp;
-   routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B)).
+   routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B);
+   commander: both the "Test" save, then the host talks to the Commander, TASKS 3.0.1).
 3. slot1 presses "Host Game", slot2 "Join Game" to 127.0.0.1:6969.
 4. Asserts: both are in the session, slot1 leads the story and slot2 doesn't, each sees the other
    player's position close to where the other game says its player is, the phase and route are known
@@ -54,9 +55,9 @@ def position(text):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
-                             "routes: the games are on routes A and B")
+                             "routes: the games are on routes A and B; commander: the host talks to the Commander")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -71,7 +72,7 @@ def main():
             failures.append(message)
 
     try:
-        {"together": together, "diverged": diverged, "routes": routes}[args.scenario](expect)
+        {"together": together, "diverged": diverged, "routes": routes, "commander": commander}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -202,6 +203,42 @@ def routes(expect):
     expect("different routes" in log_text(HOST) and "different routes" in log_text(CLIENT),
            "both logs say the routes differ")
 
+
+# The Commander on the "Test" save: west of her, facing east, the talk prompt shows (found 2026-10-18).
+COMMANDER_SPOT = "goto -114.06 138.37 -22.72 90"
+
+
+def commander(expect):
+    """TASKS 3.0.1: the host talks to the Commander (a story step inside the phase 16_AB_bunker_Order),
+    the client stands still. Asserts the host's step goes 130 -> 140. Observed 2026-10-18: the client's
+    game stays at step 130 and shows no conversation; the scenario prints that as an observation, since
+    what the client should see is task 3.6."""
+    result = connect(expect, 1, 1)
+    if result is None:
+        return
+    host_state, client_state = result[2], result[3]
+    expect(parse(host_state, "step") == "130" and parse(client_state, "step") == "130",
+           f"both start at step 130 ({parse(host_state, 'step')} / {parse(client_state, 'step')})")
+
+    host_step = "130"
+    for attempt in range(2):
+        # Hold B next to her; the first try in a fresh session sometimes comes before the talk prompt.
+        bot.cmd(HOST, [COMMANDER_SPOT, "wait 3000", "pad B 1500", "wait 2500", f"shot commander_host_talk{attempt}"])
+        if attempt == 0:
+            bot.cmd(CLIENT, ["shot commander_client_during"])
+        # A advances the lines. Stop as soon as the step changes: after the talk A jumps, and 2B can fall off.
+        for _ in range(12):
+            host_step = parse(bot.cmd(HOST, ["pad A 120", "wait 2300"] * 3 + ["state"], quiet=True)[-1], "step")
+            if host_step != "130":
+                break
+        if host_step != "130":
+            break
+
+    bot.cmd(HOST, ["shot commander_host_after"])
+    client_after = bot.cmd(CLIENT, ["state", "shot commander_client_after"])[-2]
+    expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
+    print(f"  observed: client step {parse(client_state, 'step')} -> {parse(client_after, 'step')}, "
+          f"phase {parse(client_after, 'phase')}; screenshots commander_client_during / _after")
 
 if __name__ == "__main__":
     main()

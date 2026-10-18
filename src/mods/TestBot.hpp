@@ -30,8 +30,10 @@
 //   host [port]                  "Host Game": starts automatamp_server\server.exe and connects (port 6969 by default)
 //   join <ip:port> [host]        "Join Game"; "host" = join as the player leading the story
 //   coop                         connection, role and the other player as the mod sees them
-//   snap <name>, filter <name> <=N|!=N|same:<snap>|diff:<snap>|reset>, cands [n]   memory search like Cheat Engine
+//   snap <name>, filter <name> <=N|!=N|same:<snap>|diff:<snap>|reset>, cands [n] [snap ...]   memory search like Cheat Engine
 //   read <hex rva> <hex length>  hex dump of the exe's memory (research)
+//   readh <hex address> <hex length>  hex dump at an absolute address (heap objects)
+//   find <hex rva>               pointers to exe base + rva in read-write memory (exe and heap): objects by vtable
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
 //   watch <hex rva> [1|2|4|8|x] hardware breakpoint (up to 4) on writes to exe memory, or x = on executing code; "watch off" clears
@@ -67,9 +69,11 @@ private:
     void take_screenshot(const std::string& name);
     void scan_strings(const std::string& pattern);
     void find_xrefs(uintptr_t target, uintptr_t window);
+    void read_absolute(uintptr_t address, uint64_t length);
+    void find_pointers(uintptr_t rva);
     void take_snapshot(const std::string& name);
     void filter_candidates(const std::string& name, const std::string& rule);
-    void list_candidates(size_t count);
+    void list_candidates(size_t count, const std::vector<std::string>& snapshots);
     void add_watch(uintptr_t rva, uint32_t length);
     void clear_watches();
     void arm_threads();
@@ -89,6 +93,8 @@ private:
     struct Snapshot {
         std::vector<std::pair<uint32_t, std::vector<uint8_t>>> ranges{}; // section rva, bytes
     };
+
+    static int value_of(const Snapshot& snapshot, uint32_t rva); // -1 outside the snapshot
 
     std::unordered_map<std::string, Snapshot> m_snapshots{};
     std::vector<uint32_t> m_candidates{};

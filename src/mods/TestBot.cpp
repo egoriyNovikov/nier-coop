@@ -277,12 +277,26 @@ void TestBot::start(const Command& command) {
             }
 
             finish("ok " + command.text);
+        } else if (command.verb == "readh") {
+            read_absolute(std::stoull(command.arg1, nullptr, 16), std::stoull(command.arg2, nullptr, 16));
+        } else if (command.verb == "find") {
+            find_pointers(std::stoull(command.arg1, nullptr, 16));
         } else if (command.verb == "snap") {
             take_snapshot(command.arg1);
         } else if (command.verb == "filter") {
             filter_candidates(command.arg1, command.arg2);
         } else if (command.verb == "cands") {
-            list_candidates(command.arg1.empty() ? 30 : std::stoul(command.arg1));
+            // cands [n] [snapshot ...]: also the value of each byte in the named snapshots.
+            std::istringstream words{command.text};
+            std::string word{};
+            std::vector<std::string> snapshots{};
+            words >> word >> word;
+
+            while (words >> word) {
+                snapshots.push_back(word);
+            }
+
+            list_candidates(command.arg1.empty() ? 30 : std::stoul(command.arg1), snapshots);
         } else if (command.verb == "xref") {
             find_xrefs(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 0 : std::stoull(command.arg2, nullptr, 16));
         } else if (command.verb == "watch") {
@@ -318,6 +332,76 @@ void TestBot::start(const Command& command) {
     }
 }
 
+// readh <hex address> <hex length>: like read, but an absolute address (heap objects found with find).
+// Unreadable memory is reported instead of crashing the game.
+void TestBot::read_absolute(uintptr_t address, uint64_t length) {
+    length = std::min<uint64_t>(length, 0x1000);
+
+    for (uint64_t offset = 0; offset < length; offset += 16) {
+        MEMORY_BASIC_INFORMATION info{};
+
+        if (VirtualQuery((const void*)(address + offset), &info, sizeof(info)) == 0 || info.State != MEM_COMMIT
+            || (info.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) == 0
+            || (info.Protect & PAGE_GUARD) != 0) {
+            finish("error readh: not readable at " + std::to_string(address + offset));
+            return;
+        }
+
+        std::ostringstream line{};
+        line << "mem 0x" << std::hex << address + offset << " ";
+        std::string text{};
+
+        for (auto k = 0; k < 16; ++k) {
+            const auto b = *(const uint8_t*)(address + offset + k);
+            line << std::setw(2) << std::setfill('0') << (int)b << " ";
+            text += (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+        }
+
+        finish(line.str() + text);
+    }
+
+    finish("ok readh");
+}
+
+// find <hex rva>: every 8-byte-aligned pointer to exe base + rva in committed read-write memory (exe sections
+// and heap). Finds objects by their vtable: "found +0x<rva>" inside the exe, "found heap 0x<address>" elsewhere.
+void TestBot::find_pointers(uintptr_t rva) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const auto image_end = base + nt->OptionalHeader.SizeOfImage;
+    const auto target = base + rva;
+    size_t hits{0};
+    MEMORY_BASIC_INFORMATION info{};
+    // Our own stack holds copies of the target: skip it.
+    VirtualQuery(&target, &info, sizeof(info));
+    const auto own_stack = info.AllocationBase;
+
+    for (auto address = (uintptr_t)0x10000; VirtualQuery((const void*)address, &info, sizeof(info)) != 0;
+         address = (uintptr_t)info.BaseAddress + info.RegionSize) {
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0 || (info.Protect & PAGE_GUARD) != 0
+            || info.AllocationBase == own_stack) {
+            continue;
+        }
+
+        const auto start = (const uintptr_t*)info.BaseAddress;
+        const auto count = info.RegionSize / sizeof(uintptr_t);
+
+        for (size_t i = 0; i < count && hits < 100; ++i) {
+            if (start[i] != target) {
+                continue;
+            }
+
+            const auto at = (uintptr_t)&start[i];
+            std::ostringstream line{};
+            line << "found " << std::hex << (at >= base && at < image_end ? "+0x" : "heap 0x") << (at >= base && at < image_end ? at - base : at);
+            finish(line.str());
+            ++hits;
+        }
+    }
+
+    finish("ok find (" + std::to_string(hits) + " hits)");
+}
+
 void TestBot::finish(const std::string& line) {
     spdlog::info("[Test] {}", line);
     m_out << line << std::endl;
@@ -325,7 +409,7 @@ void TestBot::finish(const std::string& line) {
 
 std::string TestBot::describe_state() {
     std::ostringstream s{};
-    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id();
+    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id() << " step=" << sdk::get_phase_step();
     const auto story = StoryWatcher::get().current();
     s << " event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.event << std::dec;
     s << " route=" << (story.route != 0 ? std::string{story.route} : "none") << " hero=" << (story.character.empty() ? "none" : story.character);
@@ -463,6 +547,16 @@ void TestBot::take_snapshot(const std::string& name) {
     finish("ok snap " + name + " (" + std::to_string(bytes) + " bytes)");
 }
 
+int TestBot::value_of(const Snapshot& snapshot, uint32_t rva) {
+    for (const auto& [start, bytes] : snapshot.ranges) {
+        if (rva >= start && rva < start + bytes.size()) {
+            return bytes[rva - start];
+        }
+    }
+
+    return -1;
+}
+
 void TestBot::filter_candidates(const std::string& name, const std::string& rule) {
     if (name == "reset") {
         m_candidates.clear();
@@ -490,16 +584,6 @@ void TestBot::filter_candidates(const std::string& name, const std::string& rule
 
         other = &other_it->second;
     }
-
-    const auto value_of = [](const Snapshot& snapshot, uint32_t rva) -> int {
-        for (const auto& [start, bytes] : snapshot.ranges) {
-            if (rva >= start && rva < start + bytes.size()) {
-                return bytes[rva - start];
-            }
-        }
-
-        return -1;
-    };
 
     const auto keep = [&](uint32_t rva, uint8_t value) {
         if (rule.starts_with("!=")) {
@@ -540,12 +624,19 @@ void TestBot::filter_candidates(const std::string& name, const std::string& rule
     finish("ok filter " + name + " " + rule + ": " + std::to_string(m_candidates.size()) + " candidates");
 }
 
-void TestBot::list_candidates(size_t count) {
+void TestBot::list_candidates(size_t count, const std::vector<std::string>& snapshots) {
     const auto base = (uintptr_t)GetModuleHandleW(nullptr);
 
     for (size_t i = 0; i < m_candidates.size() && i < count; ++i) {
         std::ostringstream line{};
-        line << "cand +0x" << std::hex << m_candidates[i] << " now=" << std::dec << (int)*(const uint8_t*)(base + m_candidates[i]);
+        line << "cand +0x" << std::hex << m_candidates[i] << std::dec;
+
+        for (const auto& name : snapshots) {
+            const auto it = m_snapshots.find(name);
+            line << " " << name << "=" << (it != m_snapshots.end() ? value_of(it->second, m_candidates[i]) : -1);
+        }
+
+        line << " now=" << (int)*(const uint8_t*)(base + m_candidates[i]);
         finish(line.str());
     }
 
