@@ -6,7 +6,7 @@ enum VersionMajor : uint {
 }
 
 enum VersionMinor : uint {
-    Value = 2
+    Value = 3
 }
 
 enum VersionPatch : uint {

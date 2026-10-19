@@ -305,6 +305,8 @@ void TestBot::start(const Command& command) {
         } else if (command.verb == "readh") {
             read_absolute(std::stoull(command.arg1, nullptr, 16), std::stoull(command.arg2, nullptr, 16));
         } else if (command.verb == "find") {
+            find_pointers((uintptr_t)GetModuleHandleW(nullptr) + std::stoull(command.arg1, nullptr, 16));
+        } else if (command.verb == "findh") {
             find_pointers(std::stoull(command.arg1, nullptr, 16));
         } else if (command.verb == "snap") {
             take_snapshot(command.arg1);
@@ -352,6 +354,21 @@ void TestBot::start(const Command& command) {
             find_near({std::stof(command.arg1), std::stof(command.arg2), std::stof(command.arg3)}, std::stof(command.arg4), command.text.ends_with(" heap"));
         } else if (command.verb == "rtti") {
             describe_rtti(std::stoull(command.arg1, nullptr, 16));
+        } else if (command.verb == "hapset") {
+            // hapset <action address> <state hash> [param]: change the state of a phase graph action as the game does.
+            const auto action = (void*)std::stoull(command.arg1, nullptr, 16);
+            const auto state = (uint32_t)std::stoul(command.arg2, nullptr, 16);
+            const auto param = command.arg3.empty() ? 0 : std::stoi(command.arg3);
+            bool changed{false};
+
+            if (!run_on_game_thread([&] { changed = sdk::set_action_state(action, state, param); }, std::chrono::seconds{3})) {
+                finish("error hapset: the game thread didn't run it (not in the world?)");
+            } else {
+                finish(changed ? "ok " + command.text : "error hapset: no function or the state didn't change");
+            }
+        } else if (command.verb == "option") {
+            const auto set = AutomataMPMod::get()->set_coop_option(command.arg1, command.arg2 != "0");
+            finish(set ? "ok " + command.text : "error option: unknown option " + command.arg1);
         } else if (command.verb == "setstep") {
             finish(sdk::set_phase_step(std::stoi(command.arg1)) ? "ok " + command.text : "error setstep: no setter");
         } else if (command.verb == "hits") {
@@ -399,11 +416,11 @@ void TestBot::read_absolute(uintptr_t address, uint64_t length) {
 
 // find <hex rva>: every 8-byte-aligned pointer to exe base + rva in committed read-write memory (exe sections
 // and heap). Finds objects by their vtable: "found +0x<rva>" inside the exe, "found heap 0x<address>" elsewhere.
-void TestBot::find_pointers(uintptr_t rva) {
+// findh <hex address>: the same for an absolute address (who points to a heap object).
+void TestBot::find_pointers(uintptr_t target) {
     const auto base = (uintptr_t)GetModuleHandleW(nullptr);
     const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     const auto image_end = base + nt->OptionalHeader.SizeOfImage;
-    const auto target = base + rva;
     const auto started = GetTickCount64();
     size_t hits{0};
     MEMORY_BASIC_INFORMATION info{};
@@ -512,6 +529,28 @@ void TestBot::describe_rtti(uintptr_t object) {
     std::ostringstream line{};
     line << "rtti vtable +0x" << std::hex << vtable - base << " " << std::string{(const char*)(type + 0x10), strnlen((const char*)(type + 0x10), 200)};
     finish(line.str());
+}
+
+void TestBot::on_think() {
+    std::scoped_lock _{m_game_mutex};
+
+    if (m_game_job) {
+        m_game_job();
+        m_game_job = nullptr;
+        m_game_done.notify_all();
+    }
+}
+
+bool TestBot::run_on_game_thread(std::function<void()> job, std::chrono::milliseconds timeout) {
+    std::unique_lock lock{m_game_mutex};
+    m_game_job = std::move(job);
+
+    if (!m_game_done.wait_for(lock, timeout, [this] { return !m_game_job; })) {
+        m_game_job = nullptr;
+        return false;
+    }
+
+    return true;
 }
 
 void TestBot::finish(const std::string& line) {

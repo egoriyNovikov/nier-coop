@@ -16,6 +16,7 @@
 
 #include "schema/Packets_generated.h"
 #include "mods/AutomataMPMod.hpp"
+#include "StoryActionSync.hpp"
 #include "StoryWatcher.hpp"
 #include "NierClient.hpp"
 
@@ -392,6 +393,8 @@ void NierClient::think() {
 
     // Enemies are tracked from the start, to know where each one first appeared.
     sync_enemy_deaths(is_connected() && m_welcome_received);
+    // Taken every frame: what finished before the session started is not sent later.
+    const auto story_actions = StoryActionSync::get().take_finished();
 
     if (!is_connected()) {
         return;
@@ -409,6 +412,7 @@ void NierClient::think() {
 
     send_log_copy();
     send_story_state();
+    send_story_actions(story_actions);
 
     // Joined while not in the world, or came back from a loading screen:
     // let the others know about the enemies around us.
@@ -735,6 +739,13 @@ void NierClient::on_player_packet_received(nier::PacketType packet_type, const n
 
         break;
     }
+    case nier::PacketType_ID_STORY_ACTION: {
+        if (!handle_story_action(packet)) {
+            spdlog::debug("Failed to handle story action");
+        }
+
+        break;
+    }
     case nier::PacketType_ID_ENEMY_DIED: {
         if (!handle_enemy_died(packet)) {
             spdlog::debug("Failed to handle enemy death");
@@ -891,6 +902,27 @@ void NierClient::send_enemy_died(const EnemyDeathSync::Death& death) {
     builder.Finish(dataoffs);
 
     send_packet(nier::PacketType_ID_ENEMY_DIED, builder.GetBufferPointer(), builder.GetSize());
+}
+
+// The host leads the story: the actions of its story scripts that finished, the client's game finishes them too.
+void NierClient::send_story_actions(const std::vector<StoryActionSync::Finished>& actions) {
+    if (!m_is_master_client || !share_story_actions) {
+        return;
+    }
+
+    for (const auto& action : actions) {
+        flatbuffers::FlatBufferBuilder builder(0);
+        const auto phase = builder.CreateString(action.phase);
+        nier::StoryActionBuilder data_builder(builder);
+        data_builder.add_phase(phase);
+        data_builder.add_graph(action.graph);
+        data_builder.add_action(action.action);
+        data_builder.add_state(action.state);
+        builder.Finish(data_builder.Finish());
+
+        send_packet(nier::PacketType_ID_STORY_ACTION, builder.GetBufferPointer(), builder.GetSize());
+        spdlog::info("[StoryAction] Sent {:08x} of graph {:08x} with {:08x} ({})", action.action, action.graph, action.state, action.phase);
+    }
 }
 
 void NierClient::sync_enemy_deaths(bool connected) {
@@ -2022,6 +2054,35 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
     }
 
     player.set_story(story);
+    return true;
+}
+
+bool NierClient::handle_story_action(const nier::PlayerPacket* packet) {
+    // Only the story of the player who leads it.
+    if (packet->guid() == m_guid || m_is_master_client || packet->data() == nullptr) {
+        return false;
+    }
+
+    flatbuffers::Verifier verifier{packet->data()->data(), packet->data()->size()};
+
+    if (!verifier.VerifyBuffer<nier::StoryAction>(nullptr)) {
+        return false;
+    }
+
+    const auto data = flatbuffers::GetRoot<nier::StoryAction>(packet->data()->data());
+    StoryActionSync::Finished finished{};
+    finished.phase = data->phase() != nullptr ? data->phase()->str() : std::string{};
+    finished.graph = data->graph();
+    finished.action = data->action();
+    finished.state = data->state();
+
+    spdlog::info("[StoryAction] The host finished {:08x} of graph {:08x} with {:08x} ({}){}", finished.action, finished.graph, finished.state,
+        finished.phase, share_story_actions ? "" : ", not following: shared story progress is off");
+
+    if (share_story_actions) {
+        StoryActionSync::get().on_remote_finished(finished);
+    }
+
     return true;
 }
 

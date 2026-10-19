@@ -19,6 +19,7 @@
 #include "AutomataMPMod.hpp"
 #include "Version.hpp"
 #include "multiplayer/ScriptTracer.hpp"
+#include "multiplayer/StoryActionSync.hpp"
 #include "multiplayer/StoryWatcher.hpp"
 
 using namespace std;
@@ -58,6 +59,7 @@ std::optional<std::string> AutomataMPMod::on_initialize() try {
 
     // Do it later.
     enetpp::global_state::get().initialize();
+    StoryActionSync::get().install();
 
     spdlog::info("Leaving AutomataMPMod.");
 
@@ -341,6 +343,7 @@ void AutomataMPMod::update_connection() {
     m_client->puppet_as_player = m_coop_puppet_as_player;
     m_client->smooth_puppet_position = m_coop_smooth_position;
     m_client->share_enemy_deaths = m_coop_share_enemy_deaths;
+    m_client->share_story_actions = m_coop_share_story;
 
     if (!in_world) {
         m_client->pump();
@@ -514,6 +517,7 @@ void AutomataMPMod::display_coop() {
     ImGui::Checkbox("Take over the buddy if I play the host's character", &m_coop_auto_swap);
     ImGui::Checkbox("Spawn a partner when there is no story buddy", &m_coop_spawn_partner);
     ImGui::Checkbox("Shared enemy deaths: an enemy killed in one game dies in the other", &m_coop_share_enemy_deaths);
+    ImGui::Checkbox("Shared story progress: the client's game follows the host's story steps", &m_coop_share_story);
     ImGui::Checkbox("Shared enemies from the host (both players must enable it)", &m_coop_sync_enemies);
     ImGui::Checkbox("Partner animations: drive the partner like a player", &m_coop_puppet_as_player);
     ImGui::Checkbox("Smooth partner movement (off: snap to every network position)", &m_coop_smooth_position);
@@ -593,11 +597,25 @@ void AutomataMPMod::on_frame() {
     }
 }
 
+bool AutomataMPMod::set_coop_option(std::string_view name, bool value) {
+    if (name == "share_story") {
+        m_coop_share_story = value;
+    } else if (name == "share_enemy_deaths") {
+        m_coop_share_enemy_deaths = value;
+    } else {
+        return false;
+    }
+
+    spdlog::info("[Coop] Option {} = {}", name, value);
+    return true;
+}
+
 void AutomataMPMod::on_think() {
     std::scoped_lock _{m_client_mutex};
 
     m_last_think = std::chrono::steady_clock::now();
     StoryWatcher::get().update();
+    StoryActionSync::get().update();
 
     if (m_wants_destroy_client) {
         if (m_client != nullptr) {

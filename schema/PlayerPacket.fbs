@@ -39,6 +39,15 @@ table StoryState {
     character: string; // hero of the route: "2B", "9S", "A2" (scene state flags PL/..)
 }
 
+// An action of a story script graph (hap::Action) finished in the sender's game (src/mods/multiplayer/StoryActionSync.hpp).
+// Added in 3.3.
+table StoryAction {
+    phase: string; // the sender's phase then, e.g. "16_AB_bunker_Order"
+    graph: uint; // hash of the action's graph, e.g. 0x312961f6 (the graph of M1010_S0030_GM)
+    action: uint; // id of the action in the graph, e.g. 0x4c4e6dc1 (the Commander's conversation is over)
+    state: uint; // the state it finished with: 0x26b80d1f for most actions, an AreaAction ends with 0x4a063532
+}
+
 table Buttons {
     buttons: [uint]; // 8 buttons
 }

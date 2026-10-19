@@ -91,6 +91,39 @@ bool set_phase_step(int32_t step) {
     set_pending_step(step);
     return true;
 }
+
+namespace {
+// bool (hap::Action*, uint32_t state hash, int32_t param), +0x356080 on 7020666.
+uintptr_t find_set_action_state() {
+    static const auto function = []() -> uintptr_t {
+        // push rdi; sub rsp, 40h; mov [rsp+20h], -2; mov [rsp+50h], rbx; mov ebx, r8d; mov rdi, rcx;
+        // lea rcx, [rsp+28h]; call <make description>; mov [rsp+38h], ebx; lea rdx, [rsp+28h]; mov rcx, rdi; call <set>
+        const auto code = utility::scan(utility::get_executable(),
+            "40 57 48 83 ec 40 48 c7 44 24 20 fe ff ff ff 48 89 5c 24 50 41 8b d8 48 8b f9 48 8d 4c 24 28 e8 ? ? ? ? 89 5c 24 38 48 8d 54 24 28 48 8b cf e8");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the function that sets an action's state");
+            return 0;
+        }
+
+        spdlog::info("[Story] Set action state function: {:x}", *code);
+        return *code;
+    }();
+
+    return function;
+}
+}
+
+bool set_action_state(void* action, uint32_t state_hash, int32_t param) {
+    const auto set_state = (bool (*)(void*, uint32_t, int32_t))find_set_action_state();
+    return set_state != nullptr && action != nullptr && set_state(action, state_hash, param);
+}
+
+void* get_action_state_function() {
+    const auto wrapper = find_set_action_state();
+    // The second call of the wrapper (offset 48).
+    return wrapper != 0 ? (void*)utility::calculate_absolute(wrapper + 49) : nullptr;
+}
 }
 
 namespace sdk {

@@ -211,10 +211,10 @@ COMMANDER_SPOT = "goto -114.06 138.37 -22.72 90"
 
 
 def commander(expect):
-    """TASKS 3.0.1: the host talks to the Commander (a story step inside the phase 16_AB_bunker_Order),
-    the client stands still. Asserts the host's step goes 130 -> 140. Observed 2026-10-18: the client's
-    game stays at step 130 and shows no conversation; the scenario prints that as an observation, since
-    what the client should see is task 3.6."""
+    """TASKS 3.0.1, 3.6.1: the host talks to the Commander (a story step inside the phase 16_AB_bunker_Order),
+    the client stands still. Asserts the host's step goes 130 -> 140 and that the client's game follows: the
+    host sends the finished actions of its story graph (ID_STORY_ACTION), the client's game finishes the same
+    ones and its step becomes 140 too (before 3.6.1 it stayed at 130, observed 2026-10-18)."""
     result = connect(expect, 1, 1)
     if result is None:
         return
@@ -240,47 +240,66 @@ def talk_to_commander(expect, host_state, client_state):
             break
 
     bot.cmd(HOST, ["shot commander_host_after"])
-    client_after = bot.cmd(CLIENT, ["state", "shot commander_client_after"])[-2]
     expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
-    print(f"  observed: client step {parse(client_state, 'step')} -> {parse(client_after, 'step')}, "
-          f"phase {parse(client_after, 'phase')}; screenshots commander_client_during / _after")
 
-# After the Commander: the phase graph waits for an area at the far end of the hangar (AreaAction, the host
-# walks there along the hangar floor), then near the host's flight unit (model 10010) the launch cutscene ev0200
-# starts and the game changes the phase to 20_AB_buker_Aerial_battle (found 2026-10-19).
+    client_step = None
+    for _ in range(10):
+        client_step = parse(bot.cmd(CLIENT, ["wait 1000", "state"], quiet=True)[-1], "step")
+        if client_step == "140":
+            break
+    bot.cmd(CLIENT, ["wait 2000", "shot commander_client_after"])
+    for slot in (HOST, CLIENT):
+        lines = [l for l in log_text(slot).splitlines() if "[StoryAction]" in l and "Hooked" not in l]
+        print(f"  {slot} story actions: {len(lines)}")
+        for line in lines[:40]:
+            print("    " + line.split("] ", 2)[-1] if "] " in line else line)
+    expect(client_step == "140", f"the client's step follows the host's to 140 ({client_step}); screenshot commander_client_after")
+
+# After the Commander: the phase graph waits for an area (AreaAction a9864814) that holds the spot where the
+# "Test" save starts (the hangar entrance), then near the host's flight unit (model 10010) the launch cutscene ev0200
+# starts; after about 40 s of flight the player character asks for the next phase (+0x81a440) and the game
+# loads 20_AB_buker_Aerial_battle (found 2026-10-19; walking the hangar floor reached the area only by chance).
 FLIGHT_UNIT = "10010"
 
 
 def hangar(expect):
-    """TASKS 3.0.1 / 3.2.1: the host talks to the Commander, goes to the hangar and flies off (a natural phase
-    change), the client stands still. Asserts the host's phase changes; prints what the client's game does."""
+    """TASKS 3.0.1 / 3.2.1 / 3.6.1: the host talks to the Commander, goes to the hangar and flies off (a natural
+    phase change), the client stands still. Asserts that the host's phase changes and that the client's game follows
+    through the story actions the host sends: the launch cutscene ev0200 and the same next phase (before 3.6.1 the
+    client's game stayed at 16_AB_bunker_Order, step 130, observed 2026-10-19)."""
     result = connect(expect, 1, 1)
     if result is None:
         return
+    host_start = parse(result[2], "player")
     talk_to_commander(expect, result[2], result[3])
 
+    # Back to where the save started: the area the graph waits for.
+    bot.cmd(HOST, [f"goto {host_start.replace(',', ' ')} 0", "wait 3000"], quiet=True)
     expect(bot.goto_entity(HOST, FLIGHT_UNIT, 2.2, 0.6, 0, 90), "the host is next to the flight unit")
-    # Along the hangar floor to the area at its end (the stick direction is that of the camera there).
-    bot.cmd(HOST, ["stick -1 0 1200", "wait 300"] * 7, quiet=True)
-    bot.goto_entity(HOST, FLIGHT_UNIT, 2.2, 0.6, 0, 90)
 
-    host_phase, client_lines = "16_AB_bunker_Order", []
+    host_phase, client_phase, client_cutscene, client_lines = "16_AB_bunker_Order", "", False, []
     for _ in range(30):
         host = bot.cmd(HOST, ["wait 3000", "state"], quiet=True)[-1]
         client = bot.cmd(CLIENT, ["state"], quiet=True)[-1]
-        host_phase = parse(host, "phase")
+        host_phase, client_phase = parse(host, "phase"), parse(client, "phase")
+        client_cutscene = client_cutscene or parse(client, "event") == "ev0200"
         line = f"host {host_phase} step {parse(host, 'step')} event {parse(host, 'event')} loading {parse(host, 'loading')} | "                f"client {parse(client, 'phase')} step {parse(client, 'step')} event {parse(client, 'event')} loading {parse(client, 'loading')}"
         if not client_lines or client_lines[-1] != line:
             client_lines.append(line)
             print("  " + line)
-        if host_phase != "16_AB_bunker_Order" and parse(host, "loading") == "0":
+        if host_phase != "16_AB_bunker_Order" and parse(host, "loading") == "0" and client_phase != "16_AB_bunker_Order":
             break
 
     bot.cmd(HOST, ["shot hangar_host_after"])
     bot.cmd(CLIENT, ["shot hangar_client_after"])
     expect(host_phase == "20_AB_buker_Aerial_battle", f"the host's phase changed to 20_AB_buker_Aerial_battle ({host_phase})")
+    expect(client_cutscene, "the client's game played the launch cutscene ev0200 too")
+    expect(client_phase == "20_AB_buker_Aerial_battle", f"the client's phase followed to 20_AB_buker_Aerial_battle ({client_phase})")
     client_coop = bot.cmd(CLIENT, ["wait 6000", "coop"], quiet=True)[-1]
-    print(f"  observed: client after the host's phase change: {client_lines[-1].split(' | ')[1]}; coop: {client_coop}")
+    print(f"  observed: client coop: {client_coop}")
+    for line in log_text(CLIENT).splitlines():
+        if any(k in line for k in ("[StoryAction] Finished", "skipped", "[Story] Phase")):
+            print("    client log: " + line.split("] ", 2)[-1])
 
 
 if __name__ == "__main__":

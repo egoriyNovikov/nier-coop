@@ -10,6 +10,7 @@
 #include <enetpp/client.h>
 
 #include "Player.hpp"
+#include "StoryActionSync.hpp"
 #include "StoryWatcher.hpp"
 #include "EnemyDeathSync.hpp"
 #include "EntitySync.hpp"
@@ -118,6 +119,7 @@ public:
     bool sync_enemies{false}; // Enemies come from the master client. Otherwise everyone keeps the enemies of their own story.
     bool puppet_as_player{true}; // Run the game's player input update on puppets, needed for run/walk animations.
     bool share_enemy_deaths{true}; // An enemy that dies in one game dies in the other (each game keeps its own enemies).
+    bool share_story_actions{true}; // The host sends the story actions that finish, the client's game finishes them too.
     bool smooth_puppet_position{true}; // Pull the puppet towards the network position every frame instead of snapping on each packet.
 
 private:
@@ -149,9 +151,11 @@ private:
     bool handle_buttons(const nier::PlayerPacket* packet);
     bool handle_enemy_died(const nier::PlayerPacket* packet);
     bool handle_story_state(const nier::PlayerPacket* packet);
+    bool handle_story_action(const nier::PlayerPacket* packet);
 
     void send_enemy_died(const EnemyDeathSync::Death& death);
     void send_story_state();
+    void send_story_actions(const std::vector<StoryActionSync::Finished>& actions);
     // Sends what was added to our log file since the last call, when the server keeps a copy of it.
     void send_log_copy();
     // Game thread. Tracks our enemies, sends their deaths, applies the deaths from the other game.

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +43,9 @@
 //   goto <x> <y> <z> [yaw]       teleport the character we control (Pl0000.setPosRotResetHap), yaw in degrees (0 = +z)
 //   near <x> <y> <z> <r> [heap]  float triplets within r of a point in the exe's writable sections (+ heap): where a position is kept
 //   rtti <hex address>           class name of the object at an absolute address (MSVC RTTI through its vtable)
+//   findh <hex address>          pointers to an absolute address (who holds a heap object)
+//   hapset <hex action> <hex state> [param]  sdk::set_action_state on the game thread: e.g. finish (26b80d1f) a phase graph action (3.6.1)
+//   option <name> <0|1>          a co-op option (AutomataMPMod::set_coop_option), e.g. share_story 0
 //   setstep <n>                  sdk::set_phase_step(n): move the story step as a story conversation does (research, 3.6.1)
 //   hits                         what watch caught: instruction, call stack (exe rvas), value after the write / rcx rdx r8 r9 rbx rsi rdi rbp
 class TestBot : public Mod {
@@ -53,6 +57,7 @@ public:
     std::optional<std::string> on_initialize() override;
     bool on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) override;
     void on_present() override;
+    void on_think() override;
 
     static DWORD WINAPI xinput_get_state(DWORD user_index, XINPUT_STATE* state);
     static BOOL WINAPI get_cursor_pos(POINT* point);
@@ -76,7 +81,7 @@ private:
     void scan_strings(const std::string& pattern);
     void find_xrefs(uintptr_t target, uintptr_t window);
     void read_absolute(uintptr_t address, uint64_t length);
-    void find_pointers(uintptr_t rva);
+    void find_pointers(uintptr_t target);
     void take_snapshot(const std::string& name);
     void filter_candidates(const std::string& name, const std::string& rule);
     void list_candidates(size_t count, const std::vector<std::string>& snapshots);
@@ -87,6 +92,8 @@ private:
     void arm_threads();
     void list_hits();
     void list_entities(float radius);
+    // Runs job on the game thread (on_think, only while in the world). False if it didn't run within timeout.
+    bool run_on_game_thread(std::function<void()> job, std::chrono::milliseconds timeout);
     static LONG WINAPI on_exception(EXCEPTION_POINTERS* info);
 
     struct Watch {
@@ -111,6 +118,9 @@ private:
 
     std::deque<Command> m_queue{};
     bool m_busy{false};
+    std::mutex m_game_mutex{};
+    std::condition_variable m_game_done{};
+    std::function<void()> m_game_job{};
     std::string m_current{};
     std::chrono::steady_clock::time_point m_until{};
     std::ofstream m_out{};

@@ -43,6 +43,9 @@ struct EnemyDied;
 struct StoryState;
 struct StoryStateBuilder;
 
+struct StoryAction;
+struct StoryActionBuilder;
+
 struct Buttons;
 struct ButtonsBuilder;
 
@@ -77,7 +80,8 @@ enum PacketType : uint32_t {
   PacketType_ID_ENEMY_DIED = 4101,
   PacketType_ID_LOG_CHUNK = 4102,
   PacketType_ID_STORY_STATE = 4103,
-  PacketType_ID_CLIENT_END = 4104,
+  PacketType_ID_STORY_ACTION = 4104,
+  PacketType_ID_CLIENT_END = 4105,
   PacketType_ID_PING = 32768,
   PacketType_ID_PONG = 32769,
   PacketType_ID_HELLO = 32770,
@@ -86,7 +90,7 @@ enum PacketType : uint32_t {
   PacketType_MAX = PacketType_ID_WELCOME
 };
 
-inline const PacketType (&EnumValuesPacketType())[25] {
+inline const PacketType (&EnumValuesPacketType())[26] {
   static const PacketType values[] = {
     PacketType_ID_MASTER_CLIENT_START,
     PacketType_ID_SPAWN_ENTITY,
@@ -108,6 +112,7 @@ inline const PacketType (&EnumValuesPacketType())[25] {
     PacketType_ID_ENEMY_DIED,
     PacketType_ID_LOG_CHUNK,
     PacketType_ID_STORY_STATE,
+    PacketType_ID_STORY_ACTION,
     PacketType_ID_CLIENT_END,
     PacketType_ID_PING,
     PacketType_ID_PONG,
@@ -139,6 +144,7 @@ inline const char *EnumNamePacketType(PacketType e) {
     case PacketType_ID_ENEMY_DIED: return "ID_ENEMY_DIED";
     case PacketType_ID_LOG_CHUNK: return "ID_LOG_CHUNK";
     case PacketType_ID_STORY_STATE: return "ID_STORY_STATE";
+    case PacketType_ID_STORY_ACTION: return "ID_STORY_ACTION";
     case PacketType_ID_CLIENT_END: return "ID_CLIENT_END";
     case PacketType_ID_PING: return "ID_PING";
     case PacketType_ID_PONG: return "ID_PONG";
@@ -176,7 +182,7 @@ inline const char *EnumNameVersionMajor(VersionMajor e) {
 }
 
 enum VersionMinor : uint32_t {
-  VersionMinor_Value = 2,
+  VersionMinor_Value = 3,
   VersionMinor_MIN = VersionMinor_Value,
   VersionMinor_MAX = VersionMinor_Value
 };
@@ -1282,6 +1288,93 @@ inline flatbuffers::Offset<StoryState> CreateStoryStateDirect(
       event,
       route,
       character__);
+}
+
+struct StoryAction FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef StoryActionBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PHASE = 4,
+    VT_GRAPH = 6,
+    VT_ACTION = 8,
+    VT_STATE = 10
+  };
+  const flatbuffers::String *phase() const {
+    return GetPointer<const flatbuffers::String *>(VT_PHASE);
+  }
+  uint32_t graph() const {
+    return GetField<uint32_t>(VT_GRAPH, 0);
+  }
+  uint32_t action() const {
+    return GetField<uint32_t>(VT_ACTION, 0);
+  }
+  uint32_t state() const {
+    return GetField<uint32_t>(VT_STATE, 0);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PHASE) &&
+           verifier.VerifyString(phase()) &&
+           VerifyField<uint32_t>(verifier, VT_GRAPH) &&
+           VerifyField<uint32_t>(verifier, VT_ACTION) &&
+           VerifyField<uint32_t>(verifier, VT_STATE) &&
+           verifier.EndTable();
+  }
+};
+
+struct StoryActionBuilder {
+  typedef StoryAction Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_phase(flatbuffers::Offset<flatbuffers::String> phase) {
+    fbb_.AddOffset(StoryAction::VT_PHASE, phase);
+  }
+  void add_graph(uint32_t graph) {
+    fbb_.AddElement<uint32_t>(StoryAction::VT_GRAPH, graph, 0);
+  }
+  void add_action(uint32_t action) {
+    fbb_.AddElement<uint32_t>(StoryAction::VT_ACTION, action, 0);
+  }
+  void add_state(uint32_t state) {
+    fbb_.AddElement<uint32_t>(StoryAction::VT_STATE, state, 0);
+  }
+  explicit StoryActionBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<StoryAction> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<StoryAction>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<StoryAction> CreateStoryAction(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<flatbuffers::String> phase = 0,
+    uint32_t graph = 0,
+    uint32_t action = 0,
+    uint32_t state = 0) {
+  StoryActionBuilder builder_(_fbb);
+  builder_.add_state(state);
+  builder_.add_action(action);
+  builder_.add_graph(graph);
+  builder_.add_phase(phase);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<StoryAction> CreateStoryActionDirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    const char *phase = nullptr,
+    uint32_t graph = 0,
+    uint32_t action = 0,
+    uint32_t state = 0) {
+  auto phase__ = phase ? _fbb.CreateString(phase) : 0;
+  return nier::CreateStoryAction(
+      _fbb,
+      phase__,
+      graph,
+      action,
+      state);
 }
 
 struct Buttons FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {

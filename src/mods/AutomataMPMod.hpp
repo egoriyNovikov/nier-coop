@@ -19,6 +19,8 @@
 class AutomataMPMod : public Mod {
 public:
     static std::shared_ptr<AutomataMPMod> get();
+    // A co-op option by name, for the test bot ("share_story"). False if there is no such option.
+    bool set_coop_option(std::string_view name, bool value);
 public:
 
     ~AutomataMPMod();
@@ -117,6 +119,7 @@ private:
     bool m_coop_puppet_as_player{true};
     bool m_coop_smooth_position{true};
     bool m_coop_share_enemy_deaths{true};
+    bool m_coop_share_story{true}; // StoryActionSync (TASKS 3.6.1)
     bool m_debug_hotkeys{false};
     bool m_trace_scripts{false};
     // "Join Game" as the player leading the story (dedicated server, both players press Join).
