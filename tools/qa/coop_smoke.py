@@ -1,12 +1,13 @@
 """Co-op smoke test (task 0.5.8): two test copies of the game connect to each other without a person.
 
-  python tools/qa/coop_smoke.py [--scenario together|diverged|routes] [--no-build]
+  python tools/qa/coop_smoke.py [--scenario together|diverged|routes|commander|hangar] [--no-build]
 
 1. Builds the mod and the server, installs them into .testinstall/slot1 (host) and slot2 (client).
 2. Both copies load a save through the test bot (together: both the "Test" save at the Bunker;
    diverged: the host the "Test" save, the client the finished save at the Resistance Camp;
    routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B);
-   commander: both the "Test" save, then the host talks to the Commander, TASKS 3.0.1).
+   commander: both the "Test" save, then the host talks to the Commander, TASKS 3.0.1;
+   hangar: as commander, then the host goes on to the hangar until the phase changes, TASKS 3.0.1 / 3.2.1).
 3. slot1 presses "Host Game", slot2 "Join Game" to 127.0.0.1:6969.
 4. Asserts: both are in the session, slot1 leads the story and slot2 doesn't, each sees the other
    player's position close to where the other game says its player is, the phase and route are known
@@ -55,9 +56,10 @@ def position(text):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "hangar"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
-                             "routes: the games are on routes A and B; commander: the host talks to the Commander")
+                             "routes: the games are on routes A and B; commander: the host talks to the Commander; "
+                             "hangar: then the host flies off from the hangar (natural phase change)")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -72,7 +74,7 @@ def main():
             failures.append(message)
 
     try:
-        {"together": together, "diverged": diverged, "routes": routes, "commander": commander}[args.scenario](expect)
+        {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "hangar": hangar}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -216,7 +218,10 @@ def commander(expect):
     result = connect(expect, 1, 1)
     if result is None:
         return
-    host_state, client_state = result[2], result[3]
+    talk_to_commander(expect, result[2], result[3])
+
+
+def talk_to_commander(expect, host_state, client_state):
     expect(parse(host_state, "step") == "130" and parse(client_state, "step") == "130",
            f"both start at step 130 ({parse(host_state, 'step')} / {parse(client_state, 'step')})")
 
@@ -239,6 +244,44 @@ def commander(expect):
     expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
     print(f"  observed: client step {parse(client_state, 'step')} -> {parse(client_after, 'step')}, "
           f"phase {parse(client_after, 'phase')}; screenshots commander_client_during / _after")
+
+# After the Commander: the phase graph waits for an area at the far end of the hangar (AreaAction, the host
+# walks there along the hangar floor), then near the host's flight unit (model 10010) the launch cutscene ev0200
+# starts and the game changes the phase to 20_AB_buker_Aerial_battle (found 2026-10-19).
+FLIGHT_UNIT = "10010"
+
+
+def hangar(expect):
+    """TASKS 3.0.1 / 3.2.1: the host talks to the Commander, goes to the hangar and flies off (a natural phase
+    change), the client stands still. Asserts the host's phase changes; prints what the client's game does."""
+    result = connect(expect, 1, 1)
+    if result is None:
+        return
+    talk_to_commander(expect, result[2], result[3])
+
+    expect(bot.goto_entity(HOST, FLIGHT_UNIT, 2.2, 0.6, 0, 90), "the host is next to the flight unit")
+    # Along the hangar floor to the area at its end (the stick direction is that of the camera there).
+    bot.cmd(HOST, ["stick -1 0 1200", "wait 300"] * 7, quiet=True)
+    bot.goto_entity(HOST, FLIGHT_UNIT, 2.2, 0.6, 0, 90)
+
+    host_phase, client_lines = "16_AB_bunker_Order", []
+    for _ in range(30):
+        host = bot.cmd(HOST, ["wait 3000", "state"], quiet=True)[-1]
+        client = bot.cmd(CLIENT, ["state"], quiet=True)[-1]
+        host_phase = parse(host, "phase")
+        line = f"host {host_phase} step {parse(host, 'step')} event {parse(host, 'event')} loading {parse(host, 'loading')} | "                f"client {parse(client, 'phase')} step {parse(client, 'step')} event {parse(client, 'event')} loading {parse(client, 'loading')}"
+        if not client_lines or client_lines[-1] != line:
+            client_lines.append(line)
+            print("  " + line)
+        if host_phase != "16_AB_bunker_Order" and parse(host, "loading") == "0":
+            break
+
+    bot.cmd(HOST, ["shot hangar_host_after"])
+    bot.cmd(CLIENT, ["shot hangar_client_after"])
+    expect(host_phase == "20_AB_buker_Aerial_battle", f"the host's phase changed to 20_AB_buker_Aerial_battle ({host_phase})")
+    client_coop = bot.cmd(CLIENT, ["wait 6000", "coop"], quiet=True)[-1]
+    print(f"  observed: client after the host's phase change: {client_lines[-1].split(' | ')[1]}; coop: {client_coop}")
+
 
 if __name__ == "__main__":
     main()

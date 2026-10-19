@@ -116,7 +116,7 @@ def cmd(slot, commands, quiet=False):
 # Make them once with `cmd shot <name>` on each screen. Blind timed presses were not enough: a press lost
 # on the title screen shifted the rest and once ended in License, once in Exit Game -> Yes.
 REFERENCE = REPO / ".testinstall" / "reference"
-SCREENS = ["title", "main_menu", "load_game", "confirm_load", "start_menu", "name_entry"]
+SCREENS = ["title", "main_menu", "load_game", "confirm_load", "start_menu", "name_entry", "new_game"]
 # (x0, y0, x1, y1, size): screen header ("LOAD GAME" / "START MENU" text), centre (main menu items vs
 # "Press Any Button"), save thumbnail (only on Load Game). Measured 2026-10-18: closest pair of different
 # screens differs by 10 (title vs main menu, centre), 22+ elsewhere.
@@ -147,19 +147,89 @@ def screen(slot):
     return best if best_distance <= UNKNOWN_DISTANCE else "unknown"
 
 
+# Main menu items (Continue, New Game, Settings, License, Exit Game): the highlighted one has a thin bright line
+# under it. Measured on 1280x720 (2026-10-19): the line under Continue is row 438, items are 42 rows apart.
+MENU_LINE, MENU_STEP, MENU_ITEMS = 438 / 720, 42 / 720, 5
+
+
+def main_menu_item(path):
+    """Index of the highlighted main menu item (0 = Continue). The mouse pointer over the game window highlights
+    the item under it, so the cursor is not always on Continue (2026-10-19: A opened New Game)."""
+    from PIL import Image
+    image = Image.open(path).convert("L")
+    w, h = image.size
+    strip = image.crop((int(0.36 * w), 0, int(0.62 * w), h))
+    rows = [sum(strip.crop((0, y, strip.width, y + 1)).getdata()) / strip.width for y in range(h)]
+    scores = []
+    for k in range(MENU_ITEMS):
+        y = round((MENU_LINE + k * MENU_STEP) * h)
+        line = max(range(y - 2, y + 3), key=lambda r: rows[r])
+        scores.append((rows[line] - (rows[line - 3] + rows[line + 3]) / 2, k))
+    return max(scores)[1]
+
+
+# Load Game: the selected save has a dark pointer left of it. Measured on 1280x720 (2026-10-19): pointer column
+# x 45..78, rows centred at 185 + 140 * slot. A press could land on the wrong save (2 of 9 runs loaded another one).
+SAVE_ROW, SAVE_STEP, SAVE_ROWS = 185 / 720, 140 / 720, 3
+
+
+def save_pointer(path):
+    """Index of the save the Load Game pointer is at (0 = top)."""
+    from PIL import Image, ImageStat
+    image = Image.open(path).convert("L")
+    w, h = image.size
+    darkness = []
+    for k in range(SAVE_ROWS):
+        y = (SAVE_ROW + k * SAVE_STEP) * h
+        box = (int(45 / 1280 * w), int(y - 14 / 720 * h), int(78 / 1280 * w), int(y + 14 / 720 * h))
+        darkness.append((255 - ImageStat.Stat(image.crop(box)).mean[0], k))
+    return max(darkness)[1]
+
+
+def menu_actions(slot, save_index):
+    """Presses for each menu screen on the way to save N. Looks at the main menu highlight before pressing A, and
+    backs out of New Game: there "LEFT, A" would answer Yes to "Delete the current save data"."""
+    def main_menu():
+        shot = cmd(slot, ["shot menu"], quiet=True)
+        item = main_menu_item(shot[0][5:]) if shot and shot[0].startswith("shot ") else -1
+        if item == 0:
+            return ["pad A 150", "wait 2500"]
+        return ["pad UP 120", "wait 500"] * max(item, 1)
+
+    def load_game():
+        shot = cmd(slot, ["shot menu"], quiet=True)
+        at = save_pointer(shot[0][5:]) if shot and shot[0].startswith("shot ") else -1
+        if at == save_index:
+            return ["pad A 150", "wait 1500"]
+        return ["pad DOWN 120" if at < save_index else "pad UP 120", "wait 500"]
+    return {
+        "title": ["pad A 150", "wait 2500"],
+        "main_menu": main_menu,
+        "load_game": load_game,
+        "confirm_load": ["pad LEFT 120", "pad A 150", "wait 5000"],
+        "new_game": ["pad B 150", "wait 1500", "pad B 150", "wait 2500"],  # No, then back to the main menu
+    }
+
+
 def player_state(slot):
     state = cmd(slot, ["state"], quiet=True)[-1:]
     return state[0] if state and "player=" in state[0] and "player=none" not in state[0] else None
 
 
+def goto_entity(slot, model, dx=0.0, dy=0.0, dz=0.0, yaw=0):
+    """Teleports next to the nearest entity with that model (hex, as `entities` prints it), at its position now:
+    the Bunker turns, so its coordinates change with time. False if there is no such entity."""
+    found = [line for line in cmd(slot, ["entities 3000"], quiet=True) if f" model={model} " in line]
+    if not found:
+        return False
+    x, y, z = (float(v) for v in found[0].split(" pos=")[1].split()[0].split(","))
+    return cmd(slot, [f"goto {x + dx} {y + dy} {z + dz} {yaw}", "wait 2500"], quiet=True)[0].startswith("ok")
+
+
 def load(slot, save_index, timeout=240):
     """From wherever the menus are into the world of save N (0 = top), looking at the screen before each press."""
     root = slot_dir(slot)
-    actions = {
-        "title": ["pad A 150", "wait 2500"],
-        "main_menu": ["pad A 150", "wait 2500"],  # the cursor starts on Continue
-        "load_game": ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index + ["pad A 150", "wait 1500"],
-        "confirm_load": ["pad LEFT 120", "pad A 150", "wait 5000"],
+    actions = menu_actions(slot, save_index) | {
         "start_menu": ["pad A 150", "wait 5000"],  # Start Game is the first item
         "name_entry": ["pad B 150", "wait 2000"],  # a new game was started by mistake: back out
     }
@@ -177,7 +247,8 @@ def load(slot, save_index, timeout=240):
         name = screen(slot)
         if not seen or seen[-1] != name:
             seen.append(name)
-        cmd(slot, actions.get(name, ["wait 2000"]), quiet=True)
+        action = actions.get(name, ["wait 2000"])
+        cmd(slot, action() if callable(action) else action, quiet=True)
     cmd(slot, ["shot load_failed"])
     print(f"{slot}: RESULT: FAIL the player did not appear in {timeout} s (screens: {' > '.join(seen)})")
     return False
@@ -185,18 +256,14 @@ def load(slot, save_index, timeout=240):
 
 def to_start_menu(slot, save_index, timeout=180):
     """From the title screen to the Start Menu of save N (Start Game / Chapter Select)."""
-    actions = {
-        "title": ["pad A 150", "wait 2500"],
-        "main_menu": ["pad A 150", "wait 2500"],
-        "load_game": ["pad UP 120"] * 3 + ["pad DOWN 120"] * save_index + ["pad A 150", "wait 1500"],
-        "confirm_load": ["pad LEFT 120", "pad A 150", "wait 5000"],
-    }
+    actions = menu_actions(slot, save_index)
     end = time.time() + timeout
     while time.time() < end:
         name = screen(slot)
         if name == "start_menu":
             return True
-        cmd(slot, actions.get(name, ["wait 2000"]), quiet=True)
+        action = actions.get(name, ["wait 2000"])
+        cmd(slot, action() if callable(action) else action, quiet=True)
     return False
 
 

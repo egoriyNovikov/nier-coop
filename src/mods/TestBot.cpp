@@ -53,6 +53,7 @@ struct Hit {
     uintptr_t rip;
     uintptr_t stack[12];
     uintptr_t args[4]; // rcx, rdx, r8, r9 of an execute breakpoint (the function's first arguments)
+    uintptr_t saved[4]; // rbx, rsi, rdi, rbp of an execute breakpoint (objects a function in the middle works on)
     char value[48];    // write: the watched bytes after the write; execute: the string rdx points to
 };
 
@@ -86,10 +87,34 @@ std::optional<std::string> TestBot::on_initialize() {
         }
     }
 
+    // The owner's mouse pointer resting over a test window highlights the menu item under it: Load Game then
+    // loaded the save under the pointer, not the one the bot's pad selected (2026-10-19). The test copy is driven
+    // by the bot alone: the game gets no mouse (messages are dropped in on_message, the pointer is far away).
+    if (const auto get_cursor_pos = GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetCursorPos"); get_cursor_pos != nullptr) {
+        m_cursor_hook = std::make_unique<FunctionHook>(get_cursor_pos, &TestBot::get_cursor_pos);
+
+        if (!m_cursor_hook->create()) {
+            spdlog::error("[Test] Failed to hook GetCursorPos");
+        }
+    }
+
     std::thread{[this] { bot_thread(); }}.detach();
     spdlog::info("[Test] Test bot ready, commands from {}", (testmode::root() / "coop_test_cmd.txt").string());
     finish("ready");
     return std::nullopt;
+}
+
+BOOL WINAPI TestBot::get_cursor_pos(POINT* point) {
+    if (point == nullptr) {
+        return FALSE;
+    }
+
+    *point = {-32000, -32000};
+    return TRUE;
+}
+
+bool TestBot::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) {
+    return !testmode::enabled() || message < WM_MOUSEFIRST || message > WM_MOUSELAST;
 }
 
 // Pad 0 is the bot's: always connected, so the game sees a controller even on a PC without one.
@@ -303,8 +328,11 @@ void TestBot::start(const Command& command) {
             if (command.arg1 == "off") {
                 clear_watches();
             } else {
-                add_watch(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 8 : command.arg2 == "x" ? 0 : std::stoul(command.arg2));
+                add_watch((uintptr_t)GetModuleHandleW(nullptr) + std::stoull(command.arg1, nullptr, 16),
+                          command.arg2.empty() ? 8 : command.arg2 == "x" ? 0 : std::stoul(command.arg2));
             }
+        } else if (command.verb == "watchh") {
+            add_watch(std::stoull(command.arg1, nullptr, 16), command.arg2.empty() ? 8 : command.arg2 == "x" ? 0 : std::stoul(command.arg2));
         } else if (command.verb == "entities") {
             list_entities(command.arg1.empty() ? 50.0f : std::stof(command.arg1));
         } else if (command.verb == "goto") {
@@ -320,6 +348,12 @@ void TestBot::start(const Command& command) {
                 player->behavior->as<sdk::Pl0000>()->setPosRotResetHap(target, glm::angleAxis(yaw, glm::vec3{0.0f, 1.0f, 0.0f}));
                 finish("ok " + command.text);
             }
+        } else if (command.verb == "near") {
+            find_near({std::stof(command.arg1), std::stof(command.arg2), std::stof(command.arg3)}, std::stof(command.arg4), command.text.ends_with(" heap"));
+        } else if (command.verb == "rtti") {
+            describe_rtti(std::stoull(command.arg1, nullptr, 16));
+        } else if (command.verb == "setstep") {
+            finish(sdk::set_phase_step(std::stoi(command.arg1)) ? "ok " + command.text : "error setstep: no setter");
         } else if (command.verb == "hits") {
             list_hits();
         } else if (command.verb == "scan") {
@@ -370,6 +404,7 @@ void TestBot::find_pointers(uintptr_t rva) {
     const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     const auto image_end = base + nt->OptionalHeader.SizeOfImage;
     const auto target = base + rva;
+    const auto started = GetTickCount64();
     size_t hits{0};
     MEMORY_BASIC_INFORMATION info{};
     // Our own stack holds copies of the target: skip it.
@@ -378,8 +413,9 @@ void TestBot::find_pointers(uintptr_t rva) {
 
     for (auto address = (uintptr_t)0x10000; VirtualQuery((const void*)address, &info, sizeof(info)) != 0;
          address = (uintptr_t)info.BaseAddress + info.RegionSize) {
-        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0 || (info.Protect & PAGE_GUARD) != 0
-            || info.AllocationBase == own_stack) {
+        // Uncached and write-combined pages (GPU mappings) are very slow to read: skip them, they hold no objects.
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0
+            || (info.Protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) != 0 || info.AllocationBase == own_stack) {
             continue;
         }
 
@@ -399,7 +435,83 @@ void TestBot::find_pointers(uintptr_t rva) {
         }
     }
 
-    finish("ok find (" + std::to_string(hits) + " hits)");
+    finish("ok find (" + std::to_string(hits) + " hits, " + std::to_string(GetTickCount64() - started) + " ms)");
+}
+
+// near <x> <y> <z> <radius> [heap]: 4-byte-aligned float triplets within radius of a point in the exe's writable
+// sections (and with "heap" in all other committed read-write memory, at most 100 hits). Finds where the game
+// keeps a position, e.g. the target of the quest marker.
+void TestBot::find_near(const glm::vec3& point, float radius, bool heap) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const auto image_end = base + nt->OptionalHeader.SizeOfImage;
+    size_t hits{0};
+    MEMORY_BASIC_INFORMATION info{};
+    VirtualQuery(&point, &info, sizeof(info));
+    const auto own_stack = info.AllocationBase;
+
+    for (auto address = (uintptr_t)0x10000; hits < 100 && VirtualQuery((const void*)address, &info, sizeof(info)) != 0;
+         address = (uintptr_t)info.BaseAddress + info.RegionSize) {
+        const auto in_image = address >= base && address < image_end;
+
+        if (info.State != MEM_COMMIT || (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) == 0
+            || (info.Protect & (PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE)) != 0 || info.AllocationBase == own_stack || (!in_image && !heap)) {
+            continue;
+        }
+
+        const auto start = (const float*)info.BaseAddress;
+        const auto count = info.RegionSize / sizeof(float);
+
+        for (size_t i = 0; i + 2 < count && hits < 100; ++i) {
+            const glm::vec3 v{start[i], start[i + 1], start[i + 2]};
+
+            if (!(glm::length(v - point) <= radius)) {
+                continue;
+            }
+
+            const auto at = (uintptr_t)&start[i];
+            std::ostringstream line{};
+            line << "near " << std::hex << (in_image ? "+0x" : "heap 0x") << (in_image ? at - base : at) << std::dec << " " << v.x << "," << v.y << "," << v.z;
+            finish(line.str());
+            ++hits;
+        }
+    }
+
+    finish("ok near (" + std::to_string(hits) + " hits)");
+}
+
+// rtti <hex address>: the class of the object at an absolute address, from MSVC RTTI (vtable[-1] is the complete
+// object locator, x64: its +0xc is the rva of the type descriptor, whose name starts at +0x10: ".?AVName@@").
+void TestBot::describe_rtti(uintptr_t object) {
+    const auto base = (uintptr_t)GetModuleHandleW(nullptr);
+    const auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const auto end = base + nt->OptionalHeader.SizeOfImage;
+    const auto inside = [&](uintptr_t a) { return a >= base && a < end - 0x20; }; // no a + n: a can be ~0
+    MEMORY_BASIC_INFORMATION info{};
+
+    if (VirtualQuery((const void*)object, &info, sizeof(info)) == 0 || info.State != MEM_COMMIT || (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)) == 0) {
+        finish("error rtti: unreadable address");
+        return;
+    }
+
+    const auto vtable = *(const uintptr_t*)object;
+
+    if (!inside(vtable - 8) || !inside(*(const uintptr_t*)(vtable - 8))) {
+        finish("error rtti: no vtable at that address");
+        return;
+    }
+
+    const auto locator = *(const uintptr_t*)(vtable - 8);
+    const auto type = base + *(const uint32_t*)(locator + 0xc);
+
+    if (*(const uint32_t*)locator != 1 || !inside(type)) {
+        finish("error rtti: no type information");
+        return;
+    }
+
+    std::ostringstream line{};
+    line << "rtti vtable +0x" << std::hex << vtable - base << " " << std::string{(const char*)(type + 0x10), strnlen((const char*)(type + 0x10), 200)};
+    finish(line.str());
 }
 
 void TestBot::finish(const std::string& line) {
@@ -646,7 +758,7 @@ void TestBot::list_candidates(size_t count, const std::vector<std::string>& snap
 // Research helper: hardware write breakpoints (debug registers DR0-DR3) on exe memory in every thread of the
 // game. The exception handler records the writing instruction, the call stack unwound through the exe's
 // .pdata and the bytes after the write; `hits` prints them. Finds who writes a global (e.g. the story phase).
-void TestBot::add_watch(uintptr_t rva, uint32_t length) {
+void TestBot::add_watch(uintptr_t address, uint32_t length) {
     if (m_watches.size() >= 4) {
         finish("error watch: 4 watches already (watch off clears them)");
         return;
@@ -656,8 +768,6 @@ void TestBot::add_watch(uintptr_t rva, uint32_t length) {
         finish("error watch: length must be 1, 2, 4, 8 or x");
         return;
     }
-
-    const auto address = (uintptr_t)GetModuleHandleW(nullptr) + rva;
 
     if (length != 0 && address % length != 0) {
         finish("error watch: the address must be aligned to the length");
@@ -680,6 +790,8 @@ void TestBot::clear_watches() {
     m_armed_threads.clear();
     arm_threads(); // writes empty debug registers
     m_armed_threads.clear();
+    g_hit_count = 0; // the next watch starts with an empty list of hits
+    g_hits_dropped = 0;
     finish("ok watch off");
 }
 
@@ -795,6 +907,10 @@ LONG WINAPI TestBot::on_exception(EXCEPTION_POINTERS* info) {
             hit.args[1] = c.Rdx;
             hit.args[2] = c.R8;
             hit.args[3] = c.R9;
+            hit.saved[0] = c.Rbx;
+            hit.saved[1] = c.Rsi;
+            hit.saved[2] = c.Rdi;
+            hit.saved[3] = c.Rbp;
             MEMORY_BASIC_INFORMATION mbi{};
 
             if (VirtualQuery((const void*)c.Rdx, &mbi, sizeof(mbi)) != 0 && mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)) != 0 &&
@@ -897,7 +1013,8 @@ void TestBot::list_hits() {
         }
 
         if (g_watch_execute[hit.slot]) {
-            line << " args " << std::hex << hit.args[0] << " " << hit.args[1] << " " << hit.args[2] << " " << hit.args[3] << std::dec;
+            line << " args " << std::hex << hit.args[0] << " " << hit.args[1] << " " << hit.args[2] << " " << hit.args[3] << " rbx rsi rdi rbp "
+                 << hit.saved[0] << " " << hit.saved[1] << " " << hit.saved[2] << " " << hit.saved[3] << std::dec;
         }
 
         line << " value " << text;

@@ -67,6 +67,30 @@ int32_t get_phase_step() {
 
     return step != nullptr ? *step : -2;
 }
+
+bool set_phase_step(int32_t step) {
+    static const auto set_pending_step = []() -> void (*)(int32_t) {
+        // push rbx; sub rsp, 20h; cmp [hud], 0; mov ebx, ecx; jz; mov rax, [lock]; test eax, eax; jz; lea rcx, [lock];
+        // call [EnterCriticalSection]; mov rax, [lock]; test ebx, ebx; jz; cmp [pending], ebx (+0x8fae70 on 7020666)
+        const auto code = utility::scan(utility::get_executable(),
+            "40 53 48 83 ec 20 83 3d ? ? ? ? 00 8b d9 74 ? 48 8b 05 ? ? ? ? 85 c0 74 ? 48 8d 0d ? ? ? ? ff 15 ? ? ? ? 48 8b 05 ? ? ? ? 85 db 74 ? 39 1d");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the function that sets the phase step");
+            return nullptr;
+        }
+
+        spdlog::info("[Story] Set phase step function: {:x}", *code);
+        return (void (*)(int32_t))*code;
+    }();
+
+    if (set_pending_step == nullptr) {
+        return false;
+    }
+
+    set_pending_step(step);
+    return true;
+}
 }
 
 namespace sdk {

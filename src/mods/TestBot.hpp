@@ -36,10 +36,14 @@
 //   find <hex rva>               pointers to exe base + rva in read-write memory (exe and heap): objects by vtable
 //   xref <hex rva> [hex window]  code addressing [rva - window, rva] RIP-relatively (research)
 //   scan <regex>                 strings in the exe's writable sections matching regex, as "found +0x<offset> <text>"
-//   watch <hex rva> [1|2|4|8|x] hardware breakpoint (up to 4) on writes to exe memory, or x = on executing code; "watch off" clears
+//   watch <hex rva> [1|2|4|8|x] hardware breakpoint (up to 4) on writes to exe memory, or x = on executing code; "watch off" clears them and the hits
+//   watchh <hex address> [1|2|4|8|x]  the same at an absolute address (fields of heap objects)
 //   entities [radius]            entities near the player: name, model, handle, position, distance (nearest first)
 //   goto <x> <y> <z> [yaw]       teleport the character we control (Pl0000.setPosRotResetHap), yaw in degrees (0 = +z)
-//   hits                         what watch caught: instruction, call stack (exe rvas), value after the write / rcx rdx r8 r9
+//   near <x> <y> <z> <r> [heap]  float triplets within r of a point in the exe's writable sections (+ heap): where a position is kept
+//   rtti <hex address>           class name of the object at an absolute address (MSVC RTTI through its vtable)
+//   setstep <n>                  sdk::set_phase_step(n): move the story step as a story conversation does (research, 3.6.1)
+//   hits                         what watch caught: instruction, call stack (exe rvas), value after the write / rcx rdx r8 r9 rbx rsi rdi rbp
 class TestBot : public Mod {
 public:
     std::string_view get_name() const override {
@@ -47,9 +51,11 @@ public:
     }
 
     std::optional<std::string> on_initialize() override;
+    bool on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) override;
     void on_present() override;
 
     static DWORD WINAPI xinput_get_state(DWORD user_index, XINPUT_STATE* state);
+    static BOOL WINAPI get_cursor_pos(POINT* point);
 
 private:
     struct Command {
@@ -74,7 +80,9 @@ private:
     void take_snapshot(const std::string& name);
     void filter_candidates(const std::string& name, const std::string& rule);
     void list_candidates(size_t count, const std::vector<std::string>& snapshots);
-    void add_watch(uintptr_t rva, uint32_t length);
+    void add_watch(uintptr_t address, uint32_t length);
+    void find_near(const glm::vec3& point, float radius, bool heap);
+    void describe_rtti(uintptr_t object);
     void clear_watches();
     void arm_threads();
     void list_hits();
@@ -113,4 +121,5 @@ private:
     std::string m_shot_request{}; // name of the screenshot the bot thread waits for
 
     std::unique_ptr<FunctionHook> m_xinput_hook{};
+    std::unique_ptr<FunctionHook> m_cursor_hook{}; // GetCursorPos: the game gets no mouse in a test copy
 };
