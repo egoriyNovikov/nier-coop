@@ -1,3 +1,5 @@
+#include <Windows.h>
+
 #include <spdlog/spdlog.h>
 
 #include <utility/Scan.hpp>
@@ -124,6 +126,55 @@ void* get_action_state_function() {
     // The second call of the wrapper (offset 48).
     return wrapper != 0 ? (void*)utility::calculate_absolute(wrapper + 49) : nullptr;
 }
+
+namespace {
+uintptr_t find_phase_request_call() {
+    static const auto call = []() -> uintptr_t {
+        // The Pl0000 state handler that asks for the next phase after the Bunker launch (+0x50d68d on 7020666):
+        // mov edx, 6bff8489h; lea rcx, [rsp+60h]; call; mov [rsp+70h], esi; lea rdx, [rsp+60h]; mov rcx, rdi; call;
+        // nop; lea rcx, [rsp+68h]; call; nop; call <request>
+        const auto code = utility::scan(utility::get_executable(),
+            "ba 89 84 ff 6b 48 8d 4c 24 60 e8 ? ? ? ? 89 74 24 70 48 8d 54 24 60 48 8b cf e8 ? ? ? ? 90 48 8d 4c 24 68 e8 ? ? ? ? 90 e8");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the phase request function");
+            return 0;
+        }
+
+        return *code + 0x2c;
+    }();
+
+    return call;
+}
+}
+
+uintptr_t get_phase_request_caller() {
+    const auto call = find_phase_request_call();
+    return call != 0 ? call + 5 : 0;
+}
+
+void* get_phase_request_function() {
+    static void* function = []() -> void* {
+        const auto call = find_phase_request_call();
+
+        if (call == 0) {
+            return nullptr;
+        }
+
+        const auto request = utility::calculate_absolute(call + 1);
+
+        // mov dword ptr [state], 1 (the body is two stores and a ret)
+        if (*(const uint16_t*)request != 0x05c7 || *(const uint32_t*)(request + 6) != 1) {
+            spdlog::error("[Story] The phase request function at {:x} doesn't look as expected", request);
+            return nullptr;
+        }
+
+        spdlog::info("[Story] Phase request function: {:x}", request);
+        return (void*)request;
+    }();
+
+    return function;
+}
 }
 
 namespace sdk {
@@ -138,6 +189,40 @@ bool has_scene_state(void* system, std::string_view name) {
 
     return ((hap::scene_state::SceneStateSystem*)system)->has(hap::SceneStateName{name});
 }
+}
+
+std::string get_graph_name(const ActionGraph* graph) {
+    const auto readable = [](const void* address, size_t size) {
+        MEMORY_BASIC_INFORMATION info{};
+        return address != nullptr && VirtualQuery(address, &info, sizeof(info)) != 0 && info.State == MEM_COMMIT
+            && (info.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 && (info.Protect & PAGE_GUARD) == 0
+            && (uintptr_t)address + size <= (uintptr_t)info.BaseAddress + info.RegionSize;
+    };
+
+    if (!readable(graph, sizeof(void*))) {
+        return {};
+    }
+
+    const auto description = *(const uint8_t* const*)graph;
+
+    if (!readable(description, 0x30)) {
+        return {};
+    }
+
+    const auto name = *(const char* const*)(description + 0x28);
+
+    if (!readable(name, 64)) {
+        return {};
+    }
+
+    std::string result{};
+
+    // Shift-JIS as the game keeps it (most names are Japanese, e.g. 宝箱 for a chest, 依頼者_q210 for a quest giver).
+    for (size_t i = 0; i < 64 && (uint8_t)name[i] >= 0x20; ++i) {
+        result += name[i];
+    }
+
+    return result;
 }
 
 char get_route(void* system) {

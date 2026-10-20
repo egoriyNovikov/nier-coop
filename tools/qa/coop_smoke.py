@@ -55,10 +55,13 @@ def position(text):
 
 
 def main():
+    # Game logs carry graph names in Shift-JIS; the console may not show every character.
+    sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "hangar"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
+                             "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
                              "hangar: then the host flies off from the hangar (natural phase change)")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
@@ -74,7 +77,7 @@ def main():
             failures.append(message)
 
     try:
-        {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "hangar": hangar}[args.scenario](expect)
+        {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -87,18 +90,30 @@ def main():
     sys.exit(0 if not failures else 1)
 
 
+# Phase of each test save, to notice a wrong load.
+SAVE_PHASES = {0: "60_05_AB_Forest_Castle", 1: "16_AB_bunker_Order"}
+
+
 def connect(expect, host_save, client_save):
     """Loads the saves, Host Game + Join Game, waits for both to have the other's data.
-    A save is its index (0 = top) or a function (slot) -> bool that gets the game into the world.
+    A save is its index (0 = top), a function (slot) -> bool that gets the game into the world, or None if that
+    copy is already in the world.
     Returns (host_coop, client_coop, host_state, client_state) or None."""
     # One copy after the other: two copies loading at once reach the title screen late.
     for slot, save in ((HOST, host_save), (CLIENT, client_save)):
+        if save is None:
+            continue
         loaded = False
         for attempt in range(2):
             if attempt > 0:
                 print(f"{slot}: retrying with a fresh start")
                 bot.stop(slot)
             if bot.start(slot) and (save(slot) if callable(save) else bot.load(slot, save)):
+                # The save list cursor has picked the neighbouring save before: check where we are.
+                phase = parse(bot.cmd(slot, ["state"], quiet=True)[-1], "phase")
+                if isinstance(save, int) and save in SAVE_PHASES and phase != SAVE_PHASES[save]:
+                    print(f"{slot}: loaded {phase}, save {save} is {SAVE_PHASES[save]}: the wrong save")
+                    continue
                 loaded = True
                 break
         expect(loaded, f"{slot} loaded save {save.__doc__ if callable(save) else save}")
@@ -208,6 +223,7 @@ def routes(expect):
 
 # The Commander on the "Test" save: west of her, facing east, the talk prompt shows (found 2026-10-18).
 COMMANDER_SPOT = "goto -114.06 138.37 -22.72 90"
+COMMANDER_MODEL = "11020"  # the only entity with this model in the Bunker
 
 
 def commander(expect):
@@ -225,11 +241,21 @@ def talk_to_commander(expect, host_state, client_state):
     expect(parse(host_state, "step") == "130" and parse(client_state, "step") == "130",
            f"both start at step 130 ({parse(host_state, 'step')} / {parse(client_state, 'step')})")
 
+    host_step = host_talks(client=True)
+    expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
+    client_follows_to_140(expect)
+
+
+def host_talks(client):
+    """The host talks to the Commander, returns its step afterwards."""
     host_step = "130"
     for attempt in range(2):
         # Hold B next to her; the first try in a fresh session sometimes comes before the talk prompt.
-        bot.cmd(HOST, [COMMANDER_SPOT, "wait 3000", "pad B 1500", "wait 2500", f"shot commander_host_talk{attempt}"])
-        if attempt == 0:
+        # The Bunker turns: next to her where she is now (west of her, facing east), the old fixed spot as a fallback.
+        if not bot.goto_entity(HOST, COMMANDER_MODEL, -1.5, 0, 0, 90):
+            bot.cmd(HOST, [COMMANDER_SPOT], quiet=True)
+        bot.cmd(HOST, ["wait 3000", "pad B 1500", "wait 2500", f"shot commander_host_talk{attempt}"])
+        if attempt == 0 and client:
             bot.cmd(CLIENT, ["shot commander_client_during"])
         # A advances the lines. Stop as soon as the step changes: after the talk A jumps, and 2B can fall off.
         for _ in range(12):
@@ -240,8 +266,10 @@ def talk_to_commander(expect, host_state, client_state):
             break
 
     bot.cmd(HOST, ["shot commander_host_after"])
-    expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
+    return host_step
 
+
+def client_follows_to_140(expect):
     client_step = None
     for _ in range(10):
         client_step = parse(bot.cmd(CLIENT, ["wait 1000", "state"], quiet=True)[-1], "step")
@@ -260,6 +288,48 @@ def talk_to_commander(expect, host_state, client_state):
 # starts; after about 40 s of flight the player character asks for the next phase (+0x81a440) and the game
 # loads 20_AB_buker_Aerial_battle (found 2026-10-19; walking the hangar floor reached the area only by chance).
 FLIGHT_UNIT = "10010"
+
+
+def midjoin(expect):
+    """TASKS 3.6.1, decision 2026-10-20: the host talks to the Commander alone (step 130 -> 140), then the client
+    loads the same save and joins in the middle of the phase. Asserts that the host sends what it has done in the
+    phase so far and the client's step catches up to 140."""
+    loaded = bot.start(HOST) and bot.load(HOST, 1)
+    expect(loaded, "the host loaded save 1")
+    if not loaded:
+        return
+    host_step = host_talks(client=False)
+    expect(host_step == "140", f"the host's step is 140 after the talk, before the client joins ({host_step})")
+    bot.cmd(HOST, ["goto -69.5 142.1 0.1 0", "wait 2000"], quiet=True)
+
+    result = connect(expect, None, 1)
+    if result is None:
+        return
+    expect(parse(result[3], "step") in ("130", "140"), f"the client starts at step 130 ({parse(result[3], 'step')})")
+    client_follows_to_140(expect)
+
+
+# Graph names of personal interactions and side quests (co-op concept 5.8, decision 2026-10-20), as StoryActionSync
+# keeps them to the host.
+NOT_SHARED = ["宝箱", "採取", "ショップ", "武器屋", "道具屋", "自販機", "釣り", "実績", "アイテム"]
+
+
+def world(expect):
+    """Concept 5.8, decision 2026-10-20: both load the finished save (open world, 60_05_AB_Forest_Castle; its
+    graphs include chests, shops, fishing spots and the giver of side quest q210). The host sends the client what it
+    has done in the phase when the client comes in; asserts that none of it is from a personal or side quest graph."""
+    result = connect(expect, 0, 0)
+    if result is None:
+        return
+    bot.cmd(HOST, ["wait 10000"], quiet=True)
+    sent = [l for l in log_text(HOST).splitlines() if "[StoryAction] Sent" in l]
+    kept = [l for l in log_text(HOST).splitlines() if "not shared" in l]
+    wrong = [l for l in sent if any(w in l for w in NOT_SHARED) or re.search(r'"[^"]*q\d{3}', l)]
+    print(f"  observed: the host sent {len(sent)} actions, kept {len(kept)} to itself")
+    for line in (wrong or sent)[:15] + kept[:10]:
+        print("    " + line.split("] ", 2)[-1])
+    expect(any("came into our phase" in l for l in log_text(HOST).splitlines()), "the host sent the catch-up when the client came in")
+    expect(not wrong, f"no personal or side quest graph was sent ({len(wrong)})")
 
 
 def hangar(expect):

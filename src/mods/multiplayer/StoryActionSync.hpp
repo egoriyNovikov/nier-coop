@@ -29,6 +29,7 @@ public:
         uint32_t graph{};
         uint32_t action{};
         uint32_t state{};
+        std::string name{}; // the graph's name, only for our log (Shift-JIS from the game's data, e.g. "M1010_S0030_GM")
     };
 
     static StoryActionSync& get();
@@ -43,6 +44,12 @@ public:
 
     // Actions of our game that finished since the last call (the host sends them).
     std::vector<Finished> take_finished();
+
+    // Every action of our graphs that is finished now, for a client that joins in the middle of the phase.
+    std::vector<Finished> snapshot();
+
+    // One line per known graph: hash, name, actions started / finished / all (for the test bot).
+    std::vector<std::string> describe_graphs();
 
     // An action finished in the host's game.
     void on_remote_finished(const Finished& finished);

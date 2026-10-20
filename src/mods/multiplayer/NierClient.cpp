@@ -16,6 +16,7 @@
 
 #include "schema/Packets_generated.h"
 #include "mods/AutomataMPMod.hpp"
+#include "PhaseRequestGate.hpp"
 #include "StoryActionSync.hpp"
 #include "StoryWatcher.hpp"
 #include "NierClient.hpp"
@@ -396,6 +397,14 @@ void NierClient::think() {
     // Taken every frame: what finished before the session started is not sent later.
     const auto story_actions = StoryActionSync::get().take_finished();
 
+    {
+        // The client's own phase changes wait for the host's (TASKS 3.2.2).
+        std::scoped_lock __{m_players_mutex};
+        const auto host = get_host_player();
+        const auto follow = is_connected() && m_welcome_received && !m_is_master_client && share_story_actions && host != nullptr;
+        PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{});
+    }
+
     if (!is_connected()) {
         return;
     }
@@ -413,6 +422,13 @@ void NierClient::think() {
     send_log_copy();
     send_story_state();
     send_story_actions(story_actions);
+
+    if (!m_story_catch_up.empty()) {
+        const auto done = StoryActionSync::get().snapshot();
+        spdlog::info("[StoryAction] {} came into our phase: sending the {} actions finished in it so far", m_story_catch_up, done.size());
+        send_story_actions(done);
+        m_story_catch_up.clear();
+    }
 
     // Joined while not in the world, or came back from a loading screen:
     // let the others know about the enemies around us.
@@ -921,7 +937,7 @@ void NierClient::send_story_actions(const std::vector<StoryActionSync::Finished>
         builder.Finish(data_builder.Finish());
 
         send_packet(nier::PacketType_ID_STORY_ACTION, builder.GetBufferPointer(), builder.GetSize());
-        spdlog::info("[StoryAction] Sent {:08x} of graph {:08x} with {:08x} ({})", action.action, action.graph, action.state, action.phase);
+        spdlog::info("[StoryAction] Sent {:08x} of graph {:08x} \"{}\" with {:08x} ({})", action.action, action.graph, action.name, action.state, action.phase);
     }
 }
 
@@ -2051,6 +2067,12 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
         const auto ours = StoryWatcher::get().current();
         spdlog::info("[Story] {} is in phase {} ({}), we are in {} ({}){}", player.get_name(), story.phase, story.phase_id,
             ours.phase, ours.phase_id, story.phase == ours.phase ? "" : ": different phases");
+
+        // A client came into our phase (joined in the middle of it or loaded it after us): it gets what we have
+        // done in it so far (decision 2026-10-20).
+        if (m_is_master_client && !story.phase.empty() && story.phase != player.get_story().phase && story.phase == ours.phase) {
+            m_story_catch_up = player.get_name();
+        }
     }
 
     player.set_story(story);

@@ -18,6 +18,7 @@
 #include <sdk/ScriptFunctions.hpp>
 #include "AutomataMPMod.hpp"
 #include "Version.hpp"
+#include "multiplayer/PhaseRequestGate.hpp"
 #include "multiplayer/ScriptTracer.hpp"
 #include "multiplayer/StoryActionSync.hpp"
 #include "multiplayer/StoryWatcher.hpp"
@@ -60,6 +61,7 @@ std::optional<std::string> AutomataMPMod::on_initialize() try {
     // Do it later.
     enetpp::global_state::get().initialize();
     StoryActionSync::get().install();
+    PhaseRequestGate::get().install();
 
     spdlog::info("Leaving AutomataMPMod.");
 
@@ -616,6 +618,12 @@ void AutomataMPMod::on_think() {
     m_last_think = std::chrono::steady_clock::now();
     StoryWatcher::get().update();
     StoryActionSync::get().update();
+
+    if (m_client == nullptr) {
+        PhaseRequestGate::get().set_leader(false, {});
+    }
+
+    PhaseRequestGate::get().update();
 
     if (m_wants_destroy_client) {
         if (m_client != nullptr) {

@@ -1,3 +1,6 @@
+#include <cctype>
+#include <cstring>
+
 #include <Windows.h>
 
 #include <spdlog/spdlog.h>
@@ -13,6 +16,45 @@ namespace {
 constexpr auto RUNNING_GRACE = std::chrono::milliseconds{500};
 // The host is ahead: our graph may reach the action only after the earlier ones are finished.
 constexpr auto WAIT_LIMIT = std::chrono::seconds{120};
+
+// Graphs that are not the main story: personal interactions (co-op concept 5.8: chests, gathering, shops, items -
+// each player in their own game) and side quests (decision 2026-10-20: only the main story for now). The game names
+// its graphs in Shift-JIS; these are the words seen 2026-10-20 on build 7020666 (16_AB_bunker_Order,
+// 60_05_AB_Forest_Castle), as Shift-JIS bytes.
+constexpr const char* PERSONAL_WORDS[] = {
+    "\x95\xf3\x94\xa0", // 宝箱 chest
+    "\x8d\xcc\x8e\xe6", // 採取 gathering point
+    "\x83\x56\x83\x87\x83\x62\x83\x76", // ショップ shop
+    "\x95\x90\x8a\xed\x89\xae", // 武器屋 weapon shop (not 屋 alone: 屋上 is a rooftop)
+    "\x93\xb9\x8b\xef\x89\xae", // 道具屋 item shop
+    "\x8e\xa9\x94\xcc\x8b\x40", // 自販機 vending machine
+    "\x92\xde\x82\xe8", // 釣り fishing
+    "\x8e\xc0\x90\xd1", // 実績 achievement
+    "\x83\x41\x83\x43\x83\x65\x83\x80", // アイテム item
+};
+
+bool is_lead_byte(uint8_t c) {
+    return (c >= 0x81 && c <= 0x9f) || (c >= 0xe0 && c <= 0xfc);
+}
+
+// Why the host keeps the graph's actions to itself, nullptr if they are shared. Compares at character starts.
+const char* why_not_shared(const std::string& name) {
+    for (size_t i = 0; i < name.size(); i += is_lead_byte((uint8_t)name[i]) ? 2 : 1) {
+        // A side quest: its graphs carry the quest id, e.g. 依頼者_q210 (the giver of quest q210).
+        if (name[i] == 'q' && i + 3 < name.size() && isdigit((uint8_t)name[i + 1]) && isdigit((uint8_t)name[i + 2])
+            && isdigit((uint8_t)name[i + 3])) {
+            return "side quest";
+        }
+
+        for (const auto word : PERSONAL_WORDS) {
+            if (name.compare(i, strlen(word), word) == 0) {
+                return "personal";
+            }
+        }
+    }
+
+    return nullptr;
+}
 
 bool readable(const void* address, size_t size) {
     MEMORY_BASIC_INFORMATION info{};
@@ -95,12 +137,19 @@ void StoryActionSync::note_finished(const std::string& phase) {
                 continue;
             }
 
+            const auto name = sdk::get_graph_name(graph);
+
+            if (const auto why = why_not_shared(name); why != nullptr) {
+                spdlog::info("[StoryAction] {:08x} of graph {:08x} \"{}\" finished, not shared: {}", action->id, graph->hash, name, why);
+                continue;
+            }
+
             // Bounded: nobody takes them while we are not in a session.
             if (m_finished.size() >= 256) {
                 m_finished.erase(m_finished.begin());
             }
 
-            m_finished.push_back({phase, graph->hash, action->id, action->state});
+            m_finished.push_back({phase, graph->hash, action->id, action->state, name});
         }
 
         ++it;
@@ -198,6 +247,63 @@ std::vector<StoryActionSync::Finished> StoryActionSync::take_finished() {
     std::vector<Finished> finished{};
     finished.swap(m_finished);
     return finished;
+}
+
+std::vector<StoryActionSync::Finished> StoryActionSync::snapshot() {
+    std::scoped_lock _{m_mutex};
+    std::vector<Finished> finished{};
+
+    if (sdk::is_loading() || m_phase.empty()) {
+        return finished;
+    }
+
+    for (const auto& [hash, _graph] : m_graphs) {
+        const auto graph = get_graph(hash);
+        const auto name = graph != nullptr ? sdk::get_graph_name(graph) : std::string{};
+
+        if (graph == nullptr || why_not_shared(name) != nullptr) {
+            continue;
+        }
+
+        for (uint64_t i = 0; i < graph->count; ++i) {
+            const auto action = graph->actions[i];
+
+            if (readable(action, sizeof(*action)) && action->graph == graph && (action->flags & sdk::Action::FINISHED) != 0) {
+                finished.push_back({m_phase, graph->hash, action->id, action->state, name});
+            }
+        }
+    }
+
+    return finished;
+}
+
+std::vector<std::string> StoryActionSync::describe_graphs() {
+    std::scoped_lock _{m_mutex};
+    std::vector<std::string> lines{};
+
+    for (const auto& [hash, _graph] : m_graphs) {
+        const auto graph = get_graph(hash);
+
+        if (graph == nullptr) {
+            continue;
+        }
+
+        size_t started{}, finished{};
+
+        for (uint64_t i = 0; i < graph->count; ++i) {
+            const auto action = graph->actions[i];
+
+            if (readable(action, sizeof(*action)) && action->graph == graph) {
+                started += (action->flags & sdk::Action::STARTED) != 0;
+                finished += (action->flags & sdk::Action::FINISHED) != 0;
+            }
+        }
+
+        lines.push_back(fmt::format("graph {:08x} name={} started={} finished={} actions={} at={}", hash, sdk::get_graph_name(graph), started,
+            finished, graph->count, (void*)graph));
+    }
+
+    return lines;
 }
 
 void StoryActionSync::on_remote_finished(const Finished& finished) {

@@ -20,6 +20,8 @@
 #include "../AutomataMP.hpp"
 #include "../TestMode.hpp"
 #include "AutomataMPMod.hpp"
+#include "multiplayer/PhaseRequestGate.hpp"
+#include "multiplayer/StoryActionSync.hpp"
 #include "multiplayer/StoryWatcher.hpp"
 #include "TestBot.hpp"
 
@@ -350,6 +352,28 @@ void TestBot::start(const Command& command) {
                 player->behavior->as<sdk::Pl0000>()->setPosRotResetHap(target, glm::angleAxis(yaw, glm::vec3{0.0f, 1.0f, 0.0f}));
                 finish("ok " + command.text);
             }
+        } else if (command.verb == "hp") {
+            // hp <value>: health of our character (0 kills it: the death sequence and its phase request).
+            const auto value = (uint32_t)std::stoul(command.arg1);
+            bool done{false};
+
+            run_on_game_thread([&] {
+                const auto entity_list = sdk::EntityList::get();
+                const auto player = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+                if (player != nullptr && player->behavior != nullptr) {
+                    player->behavior->as<sdk::BehaviorAppBase>()->health() = value;
+                    done = true;
+                }
+            }, std::chrono::seconds{3});
+            finish(done ? "ok " + command.text : "error hp: no character");
+        } else if (command.verb == "graphs") {
+            // graphs: the phase's script graphs the mod knows (StoryActionSync).
+            for (const auto& line : StoryActionSync::get().describe_graphs()) {
+                finish(line);
+            }
+
+            finish("ok graphs");
         } else if (command.verb == "near") {
             find_near({std::stof(command.arg1), std::stof(command.arg2), std::stof(command.arg3)}, std::stof(command.arg4), command.text.ends_with(" heap"));
         } else if (command.verb == "rtti") {
@@ -560,7 +584,7 @@ void TestBot::finish(const std::string& line) {
 
 std::string TestBot::describe_state() {
     std::ostringstream s{};
-    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id() << " step=" << sdk::get_phase_step();
+    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id() << " step=" << sdk::get_phase_step() << " phase_held=" << PhaseRequestGate::get().is_holding();
     const auto story = StoryWatcher::get().current();
     s << " event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.event << std::dec;
     s << " route=" << (story.route != 0 ? std::string{story.route} : "none") << " hero=" << (story.character.empty() ? "none" : story.character);

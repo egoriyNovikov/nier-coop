@@ -32,6 +32,14 @@ bool set_action_state(void* action, uint32_t state_hash, int32_t param = 0);
 // The function every state change of an action goes through (+0x3ec550 on 7020666):
 // bool (hap::Action* action, const Description* state), true if the state changed. For hooks; nullptr if not found.
 void* get_action_state_function();
+// The request for a new story block (+0x81a440 on 7020666): void(), sets the main loop's state [+0x11ea89c] = 1,
+// the main loop then applies the next phase (+0x83c8f0 -> +0x3aaa30 -> +0x9c5d20). Callers found 2026-10-20:
+// the Pl0000 state handler after the Bunker launch flight (+0x50d6b9), the player's death sequence after
+// "BGM_Player_Die" (+0x691314), a Pl state shared by many characters (+0x47cff0) and a Pl0000 state (+0x4ab622).
+// For hooks; nullptr if not found.
+void* get_phase_request_function();
+// Return address of the story's call of it (the Pl0000 handler, +0x50d6be on 7020666), 0 if not found.
+uintptr_t get_phase_request_caller();
 
 // Layout of the phase's script graph, found 2026-10-19 on 7020666. A graph belongs to a script node named after
 // the quest step (e.g. "M1010_S0030_GM" in 16_AB_bunker_Order) and holds its actions:
@@ -44,6 +52,10 @@ struct ActionGraph {
     struct Action** actions;
     uint64_t count;
 };
+
+// Name of the graph in Shift-JIS (e.g. "M1010_S0030_GM", 宝箱 for a chest, 依頼者_q210 for the giver of quest q210): graph [+0x0] -> description,
+// description [+0x28] -> name (found 2026-10-20 on 7020666). Empty if unreadable.
+std::string get_graph_name(const ActionGraph* graph);
 
 struct Action {
     // Flags: started (the graph reached it), finished (set together with the state ACTION_FINISHED).

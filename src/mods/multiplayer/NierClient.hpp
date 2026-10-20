@@ -188,6 +188,8 @@ private:
     // Deaths from the other game, applied in think() on the game thread.
     StoryWatcher::Point m_sent_story{};
     std::chrono::steady_clock::time_point m_next_story_send{};
+    // A client that came into our phase and waits for the story actions finished in it before (name for the log).
+    std::string m_story_catch_up{};
 
     std::mutex m_remote_deaths_mutex{};
     std::vector<EnemyDeathSync::Death> m_remote_deaths{};
