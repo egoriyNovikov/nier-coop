@@ -12,7 +12,8 @@
 // The game asks for the next story block through one small function (sdk::get_phase_request_function); in the
 // client's game the request of the story is held back until the host's phase changes too, then let through. If the
 // session ends first, it is let through at once: the client plays on alone. Requests from the player's death and
-// from callers not yet known go through as before, they are only logged.
+// from callers not yet known go through as before, they are only logged. The story script can also apply the next
+// block itself (SaveState.loadFromMemory, found 2026-10-22), bypassing the request: that is only logged for now.
 class PhaseRequestGate {
 public:
     static PhaseRequestGate& get();
@@ -43,10 +44,13 @@ private:
     PhaseRequestGate() = default;
 
     static void on_request();
+    static bool on_load_from_memory();
     void release(const char* why);
 
     std::recursive_mutex m_mutex{};
     std::unique_ptr<FunctionHook> m_hook{};
+    // SaveState.loadFromMemory as the script function table had it.
+    bool (*m_load_from_memory)(){nullptr};
     // Return address of the story's own call (the Pl0000 handler after the Bunker launch flight).
     uintptr_t m_story_caller{};
     bool m_hold{false};

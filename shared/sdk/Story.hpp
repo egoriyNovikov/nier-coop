@@ -41,6 +41,21 @@ void* get_phase_request_function();
 // Return address of the story's call of it (the Pl0000 handler, +0x50d6be on 7020666), 0 if not found.
 uintptr_t get_phase_request_caller();
 
+// Talking to an NPC, found 2026-10-22 on 7020666. The player's interaction code (+0x7cfbb0, a held-button variant
+// +0x7cfdb0) checks the target every frame; when the button is pressed it calls virtual slot 125 of the target's
+// behavior ("on talk"). The BehaviorAppBase one (+0x41e860; NPC +0x6ff040 does a little and jumps to it) posts the
+// signal ON_TALK (hash 0x28cb0efb) to the object. The story scripts wait for it (EntityPuid#talk?, a handler) and
+// start the conversation (EntityPuid#startTalk -> hap::TalkMan). Skipping it leaves the NPC silent.
+// void(BehaviorAppBase* target). For hooks; nullptr if not found.
+void* get_talk_function();
+// Id of the entity layout that placed the object (behavior [+0x66c], e.g. 0x6aae9bcb for the Commander in the
+// Bunker). Story objectives name their target with it, see GOAL_TARGET_OFFSET.
+constexpr size_t LAYOUT_ID_OFFSET = 0x66c;
+// hap::HapGoalLocationAction (an objective marker of the graph): [+0xc0] the layout id of the target object,
+// 0xffffffff if the objective is a place. On 7020666 "Reboot: Speak with the Commander" (action 883b60bd of
+// M1010_S0030_GM) holds 0x6aae9bcb.
+constexpr size_t GOAL_TARGET_OFFSET = 0xc0;
+
 // Layout of the phase's script graph, found 2026-10-19 on 7020666. A graph belongs to a script node named after
 // the quest step (e.g. "M1010_S0030_GM" in 16_AB_bunker_Order) and holds its actions:
 // graph [+0x18] uint32 hash (the same in every run), [+0x30] hap::Action** array, [+0x38] count;

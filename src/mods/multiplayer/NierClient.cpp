@@ -18,6 +18,7 @@
 #include "mods/AutomataMPMod.hpp"
 #include "PhaseRequestGate.hpp"
 #include "StoryActionSync.hpp"
+#include "StoryTalkGate.hpp"
 #include "StoryWatcher.hpp"
 #include "BunkerRingHold.hpp"
 #include "NierClient.hpp"
@@ -405,6 +406,8 @@ void NierClient::think() {
         const auto host = get_host_player();
         const auto follow = is_connected() && m_welcome_received && !m_is_master_client && share_story_actions && host != nullptr;
         PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{}, follow ? host->get_story().phase_requests : 0);
+        // Story talks are the host's too (TASKS 3.2.3).
+        StoryTalkGate::get().set_follow(follow);
     }
 
     // Also when the session is gone: then the ring turns on its own again.

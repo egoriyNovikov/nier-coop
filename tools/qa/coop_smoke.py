@@ -7,7 +7,8 @@
    diverged: the host the "Test" save, the client the finished save at the Resistance Camp;
    routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B);
    commander: both the "Test" save, then the host talks to the Commander, TASKS 3.0.1;
-   hangar: as commander, then the host goes on to the hangar until the phase changes, TASKS 3.0.1 / 3.2.1).
+   hangar: as commander, then the host goes on to the hangar until the phase changes, TASKS 3.0.1 / 3.2.1;
+   client_talk: both the "Test" save, the client tries to talk to the Commander, then the host does, TASKS 3.2.3).
 3. slot1 presses "Host Game", slot2 "Join Game" to 127.0.0.1:6969.
 4. Asserts: both are in the session, slot1 leads the story and slot2 doesn't, each sees the other
    player's position close to where the other game says its player is, the phase and route are known
@@ -59,11 +60,12 @@ def main():
     # Game logs carry graph names in Shift-JIS; the console may not show every character.
     sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
                              "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
-                             "hangar: then the host flies off from the hangar (natural phase change)")
+                             "hangar: then the host flies off from the hangar (natural phase change); "
+                             "client_talk: the client tries the host's story talk with the Commander")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -78,7 +80,8 @@ def main():
             failures.append(message)
 
     try:
-        {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar}[args.scenario](expect)
+        {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar,
+         "client_talk": client_talk}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -280,6 +283,40 @@ def talk_to_commander(expect, host_state, client_state):
 
     host_step = host_talks(client=True)
     expect(host_step == "140", f"the host's step is 140 after the talk ({host_step})")
+    client_follows_to_140(expect)
+
+
+def client_talk(expect):
+    """TASKS 3.2.3, concept 5.8: story talks are the host's. The client holds B next to the Commander (the objective
+    "Speak with the Commander" points at her): nothing starts, its step stays 130, the log and the screen say the host
+    does it. Before 2026-10-22 the client's 9S talked to her and its step went to 140 on its own. Then the host talks
+    to her as usual and the client's step follows to 140."""
+    result = connect(expect, 1, 1)
+    if result is None:
+        return
+    host_state, client_state = result[2], result[3]
+    expect(parse(host_state, "step") == "130" and parse(client_state, "step") == "130",
+           f"both start at step 130 ({parse(host_state, 'step')} / {parse(client_state, 'step')})")
+
+    if not bot.goto_entity(CLIENT, COMMANDER_MODEL, -1.5, 0, 0, 90):
+        bot.cmd(CLIENT, [COMMANDER_SPOT], quiet=True)
+    bot.cmd(CLIENT, ["wait 3000", "pad B 1500", "wait 700", "shot client_talk_hint", "wait 1800", "shot client_talk_after_b"])
+    # What the host's talk takes (A advances lines): the client's step must not move.
+    client = bot.cmd(CLIENT, ["pad A 120", "wait 2300"] * 4 + ["state"], quiet=True)[-1]
+    print(f"  observed: client {client}")
+    expect(parse(client, "step") == "130", f"the client's step stays 130 after its try ({parse(client, 'step')})")
+    expect(int(parse(client, "talk_blocked") or 0) >= 1, f"the client's talk was blocked ({parse(client, 'talk_blocked')})")
+    tried = [l for l in log_text(CLIENT).splitlines() if "[Talk] Client tried to talk" in l]
+    for line in tried[:3]:
+        print("    client log: " + line.split("] ", 2)[-1])
+    expect(bool(tried), "the client's log says the talk is the host's")
+    host = bot.cmd(HOST, ["state"], quiet=True)[-1]
+    expect(parse(host, "step") == "130", f"the host's step is still 130 ({parse(host, 'step')})")
+
+    # The client steps aside, the host talks: the host still can, and the client's game follows.
+    bot.cmd(CLIENT, ["goto -69.5 142.1 0.1 0", "wait 1000"], quiet=True)
+    host_step = host_talks(client=False)
+    expect(host_step == "140", f"the host's step is 140 after its talk ({host_step})")
     client_follows_to_140(expect)
 
 

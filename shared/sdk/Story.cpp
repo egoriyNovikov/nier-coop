@@ -225,6 +225,23 @@ std::string get_graph_name(const ActionGraph* graph) {
     return result;
 }
 
+void* get_talk_function() {
+    static void* function = []() -> void* {
+        // push rbx; sub rsp, 40h; mov [rsp+20h], -2; mov rbx, rcx; mov edx, 28cb0efh (ON_TALK)
+        const auto code = utility::scan(utility::get_executable(), "40 53 48 83 ec 40 48 c7 44 24 20 fe ff ff ff 48 8b d9 ba fb 0e cb 28");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the talk function");
+            return nullptr;
+        }
+
+        spdlog::info("[Story] Talk function: {:x}", *code);
+        return (void*)*code;
+    }();
+
+    return function;
+}
+
 char get_route(void* system) {
     for (const auto route : {'A', 'B', 'C'}) {
         if (has_scene_state(system, std::string{"Route/"} + route)) {

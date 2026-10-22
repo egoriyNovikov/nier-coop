@@ -22,6 +22,7 @@
 #include "multiplayer/PhaseRequestGate.hpp"
 #include "multiplayer/ScriptTracer.hpp"
 #include "multiplayer/StoryActionSync.hpp"
+#include "multiplayer/StoryTalkGate.hpp"
 #include "multiplayer/StoryWatcher.hpp"
 
 using namespace std;
@@ -63,6 +64,7 @@ std::optional<std::string> AutomataMPMod::on_initialize() try {
     enetpp::global_state::get().initialize();
     StoryActionSync::get().install();
     PhaseRequestGate::get().install();
+    StoryTalkGate::get().install();
     BunkerRingHold::get().install();
 
     spdlog::info("Leaving AutomataMPMod.");
@@ -617,6 +619,12 @@ void AutomataMPMod::on_frame() {
         ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, ImGui::GetFontSize() + 2.0f), 0xFF3366FF, text);
     }
 
+    // TASKS 3.2.3: a story talk the client tried.
+    if (StoryTalkGate::get().show_hint()) {
+        ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, (ImGui::GetFontSize() + 2.0f) * 2.0f), 0xFF33CCFF,
+            "The host does this: story talks and quests are the host's in co-op");
+    }
+
     if (m_client && !m_wants_destroy_client) {
         m_client->on_frame();
     }
@@ -653,6 +661,7 @@ void AutomataMPMod::on_think() {
 
     if (m_client == nullptr) {
         PhaseRequestGate::get().set_leader(false, {}, 0);
+        StoryTalkGate::get().set_follow(false);
     }
 
     PhaseRequestGate::get().update();

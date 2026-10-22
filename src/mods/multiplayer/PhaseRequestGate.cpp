@@ -4,9 +4,11 @@
 #include <spdlog/spdlog.h>
 
 #include <sdk/Game.hpp>
+#include <sdk/ScriptFunctions.hpp>
 #include <sdk/Story.hpp>
 
 #include "PhaseRequestGate.hpp"
+#include "ScriptTracer.hpp"
 
 PhaseRequestGate& PhaseRequestGate::get() {
     static PhaseRequestGate gate{};
@@ -38,6 +40,35 @@ void PhaseRequestGate::install() {
     }
 
     spdlog::info("[Phase] Hooked the phase request function {}", function);
+
+    // TASKS 3.2.2: phase changes that don't go through the request. The script function SaveState.loadFromMemory is a
+    // jump to the function the main loop applies the next story block with (+0x38e9a0 -> +0x9c5d20 on 7020666): a
+    // story script can change the phase directly. Swapped in the script function table, the game's code stays as is.
+    if (const auto script = sdk::ScriptFunctions::get().find("SaveState.loadFromMemory"); script != nullptr && script->function != 0) {
+        m_load_from_memory = (bool (*)())script->function;
+        script->function = (uintptr_t)&PhaseRequestGate::on_load_from_memory;
+        ScriptTracer::get().exclude(script->function);
+        spdlog::info("[Phase] Watching SaveState.loadFromMemory ({:x})", (uintptr_t)m_load_from_memory);
+    } else {
+        spdlog::error("[Phase] SaveState.loadFromMemory wasn't found, direct phase changes of the story script are not seen");
+    }
+}
+
+bool PhaseRequestGate::on_load_from_memory() {
+    auto& self = get();
+    const auto rva = (uintptr_t)_ReturnAddress() - (uintptr_t)GetModuleHandleW(nullptr);
+    const auto phase = sdk::get_phase_name();
+    bool hold{};
+
+    {
+        std::scoped_lock _{self.m_mutex};
+        hold = self.m_hold;
+    }
+
+    const auto loaded = self.m_load_from_memory();
+    spdlog::info("[Phase] The story script applied the next story block itself (SaveState.loadFromMemory) in {} (caller +0x{:x}{}): {}", phase, rva,
+        hold ? ", client, not held" : "", loaded ? "loaded" : "nothing to load");
+    return loaded;
 }
 
 void PhaseRequestGate::set_leader(bool hold, const std::string& leader_phase, uint32_t leader_requests) {

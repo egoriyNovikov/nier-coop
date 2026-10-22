@@ -25,6 +25,7 @@
 #include "AutomataMPMod.hpp"
 #include "multiplayer/PhaseRequestGate.hpp"
 #include "multiplayer/StoryActionSync.hpp"
+#include "multiplayer/StoryTalkGate.hpp"
 #include "multiplayer/StoryWatcher.hpp"
 #include "TestBot.hpp"
 
@@ -609,7 +610,8 @@ void TestBot::finish(const std::string& line) {
 
 std::string TestBot::describe_state() {
     std::ostringstream s{};
-    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id() << " step=" << sdk::get_phase_step() << " phase_held=" << PhaseRequestGate::get().is_holding();
+    s << "state loading=" << sdk::is_loading() << " phase=" << sdk::get_phase_name() << " phase_id=" << sdk::get_phase_id() << " step=" << sdk::get_phase_step() << " phase_held=" << PhaseRequestGate::get().is_holding()
+      << " talk_blocked=" << StoryTalkGate::get().blocked();
     const auto story = StoryWatcher::get().current();
     s << " event=ev" << std::hex << std::setw(4) << std::setfill('0') << story.event << std::dec;
     s << " route=" << (story.route != 0 ? std::string{story.route} : "none") << " hero=" << (story.character.empty() ? "none" : story.character);
@@ -1068,6 +1070,9 @@ void TestBot::list_entities(float radius) {
         line << "entity " << std::string{entity->name, strnlen(entity->name, sizeof(entity->name))} << " model=" << std::hex
              << (uint32_t)entity->behavior->model_index() << " handle=" << entity->handle << std::dec << " pos=" << p.x << ","
              << p.y << "," << p.z << " distance=" << distance;
+        // Euler angles of the object (+0x90; +0x94 is Model::facing), e.g. a Flight Unit's pitch, yaw and bank.
+        const auto rot = (const float*)((uintptr_t)entity->behavior + 0x90);
+        line << " rot=" << rot[0] << "," << rot[1] << "," << rot[2];
         found.emplace_back(distance, line.str());
     }
 

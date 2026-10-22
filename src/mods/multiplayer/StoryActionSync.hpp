@@ -54,6 +54,11 @@ public:
     // An action finished in the host's game.
     void on_remote_finished(const Finished& finished);
 
+    // Game thread. If an objective of the story or of a side quest that is on now (a started, not finished
+    // hap::HapGoalLocationAction of a graph that is not personal) points at the object placed by that layout
+    // (sdk::LAYOUT_ID_OFFSET), the name of its graph; empty otherwise. TASKS 3.2.3: talking to it is the host's.
+    std::string find_objective_graph(uint32_t layout_id);
+
 private:
     using Clock = std::chrono::steady_clock;
 

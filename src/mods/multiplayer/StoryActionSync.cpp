@@ -7,6 +7,7 @@
 
 #include <sdk/Game.hpp>
 #include <sdk/Story.hpp>
+#include <utility/RTTI.hpp>
 
 #include "StoryActionSync.hpp"
 
@@ -304,6 +305,50 @@ std::vector<std::string> StoryActionSync::describe_graphs() {
     }
 
     return lines;
+}
+
+std::string StoryActionSync::find_objective_graph(uint32_t layout_id) {
+    std::scoped_lock _{m_mutex};
+
+    if (sdk::is_loading()) {
+        return {};
+    }
+
+    for (const auto& [hash, _graph] : m_graphs) {
+        const auto graph = get_graph(hash);
+
+        if (graph == nullptr) {
+            continue;
+        }
+
+        const auto name = sdk::get_graph_name(graph);
+
+        // A side quest's objective counts: side quests are taken and handed in by the host (concept 5.8).
+        if (const auto why = why_not_shared(name); why != nullptr && std::strcmp(why, "personal") == 0) {
+            continue;
+        }
+
+        for (uint64_t i = 0; i < graph->count; ++i) {
+            const auto action = graph->actions[i];
+
+            if (!readable(action, sdk::GOAL_TARGET_OFFSET + sizeof(uint32_t)) || action->graph != graph
+                || (action->flags & (sdk::Action::STARTED | sdk::Action::FINISHED)) != sdk::Action::STARTED) {
+                continue;
+            }
+
+            if (*(const uint32_t*)((uintptr_t)action + sdk::GOAL_TARGET_OFFSET) != layout_id) {
+                continue;
+            }
+
+            const auto type = utility::rtti::get_type_info(action);
+
+            if (type != nullptr && std::strcmp(type->name(), "class hap::HapGoalLocationAction") == 0) {
+                return name.empty() ? fmt::format("{:08x}", hash) : name;
+            }
+        }
+    }
+
+    return {};
 }
 
 void StoryActionSync::on_remote_finished(const Finished& finished) {
