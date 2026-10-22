@@ -426,15 +426,19 @@ def entities(slot, commands=()):
 
 def fly_together(expect):
     """TASKS 1.3.13, decision 2026-10-21: in the flight from the Bunker each game flies two Flight Units, the other
-    player's puppet sits on one that the game's AI flew in formation (owner's report 2026-10-21: they fly apart).
-    Asserts that in each game the puppet's unit is where the other player is, and that the client's game does not
+    player's puppet sat on one that the game's AI flew in formation (owner's report 2026-10-21: they fly apart).
+    In a flight the buddy is the game's and its unit follows the other player. Asserts that in each game the buddy's
+    unit is where the other player is, that the flight reaches its battle seen from above (camera far away), and that the client's game does not
     wait in the dark for the next block of the flight (20_AB_buker_Aerial_battle is loaded again under the same name;
     before 2026-10-22 the client's held phase request waited for a phase name change that never came)."""
     errors = {HOST: [], CLIENT: []}
+    cameras = {HOST: [], CLIENT: []}
     for _ in range(12):
         for slot in (HOST, CLIENT):
             lines = entities(slot, ["state", "coop"])
             me, net = position(parse(lines[0], "player")), position(parse(lines[1], "pos"))
+            if parse(lines[0], "cam_dist"):
+                cameras[slot].append(float(parse(lines[0], "cam_dist")))
             units = [position(l.split(" pos=")[1].split()[0]) for l in lines if l.startswith("entity") and " model=10010 " in l]
             units = [u for u in units if me and abs(u[0]) < 100]
             if me and net and len(units) >= 2:
@@ -449,6 +453,12 @@ def fly_together(expect):
         print(f"  observed: {slot} puppet unit off the network position: {[round(x, 2) for x in e]}")
         expect(len(e) >= 6 and median < 1.0,
                f"in {slot}'s game {who} Flight Unit flies where that player is (median {median if median is None else round(median, 2)} m of {len(e)})")
+    # Owner's report 2026-10-22: with the buddy as a puppet the flight never turned into the battle from above (camera
+    # 13-16 m, the unit stayed a mech and fired down). Alone the camera goes from 20 m to ~46 m after ~12 s of each block.
+    for slot in (HOST, CLIENT):
+        far = max(cameras[slot]) if cameras[slot] else None
+        print(f"  observed: {slot} camera distances: {[round(x, 1) for x in cameras[slot]]}")
+        expect(far is not None and far > 35.0, f"in {slot}'s game the flight reaches the battle seen from above (camera up to {far if far is None else round(far, 1)} m)")
     held = [l for l in log_text(CLIENT).splitlines() if "Client tried to change phase" in l]
     released = [l for l in log_text(CLIENT).splitlines() if "Letting the held phase request" in l]
     print(f"  observed: the client's phase requests held {len(held)}, let through {len(released)}")

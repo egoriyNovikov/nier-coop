@@ -156,7 +156,11 @@ public:
     bool puppet_as_player{true}; // Run the game's player input update on puppets, needed for run/walk animations.
     bool share_enemy_deaths{true}; // An enemy that dies in one game dies in the other (each game keeps its own enemies).
     bool share_story_actions{true}; // The host sends the story actions that finish, the client's game finishes them too.
-    bool smooth_puppet_position{true}; // Pull the puppet towards the network position every frame instead of snapping on each packet.
+    bool smooth_puppet_position{true};
+    // Research (complaint 2026-10-22, camera and flight mode in the Bunker flight): move the puppet's Flight Unit.
+    static inline std::atomic<bool> follow_flight_units{true};
+    static inline std::atomic<bool> research_takeover{true}; // the story buddy becomes the other player's puppet
+    static inline std::atomic<bool> research_swap{true};     // the client switches to the buddy (9S) // Pull the puppet towards the network position every frame instead of snapping on each packet.
 
 private:
     void on_connect();
@@ -222,6 +226,8 @@ private:
     Vector3f remote_position(Player& player) const;
     // The Flight Unit the puppet sits on in a flight, nullptr if it isn't on one (TASKS 1.3.13).
     sdk::Behavior* get_ridden_flight_unit(sdk::Pl0000* npc) const;
+    // While our character flies: the Flight Unit of our story buddy (the game's, the other player flies it), else nullptr.
+    sdk::Entity* get_buddy_flight_unit() const;
     void update_bunker_ring();
     // The host sends the angle of its ring, the client turns its own ring the same (ID_BUNKER_RING).
     void send_bunker_ring();
@@ -289,7 +295,7 @@ private:
     float m_sent_ring_angle{0.0f};
     std::chrono::steady_clock::time_point m_sent_ring_time{};
     bool m_following_host_ring{false};
-    uint32_t m_puppet_flight_unit{0}; // the puppet's Flight Unit we move, for the log
+    uint32_t m_puppet_flight_unit{0}; // the buddy's Flight Unit we move, for the log
     // The player whose story buddy we don't take over because the routes differ, logged once.
     std::string m_route_block_logged{};
     float m_stat_position_error_sum{0.0f};

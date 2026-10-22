@@ -12,6 +12,8 @@
 #include <spdlog/spdlog.h>
 
 #include <sdk/Bunker.hpp>
+#include <sdk/CameraGame.hpp>
+#include <sdk/regenny/CameraData.hpp>
 #include <sdk/Entity.hpp>
 #include <sdk/EntityList.hpp>
 #include <sdk/Game.hpp>
@@ -627,6 +629,16 @@ std::string TestBot::describe_state() {
             const auto ring = sdk::BunkerRing::find(ring_handle);
             const auto r = ring ? ring->to_ring(p) : p;
             s << " ring=" << (ring ? std::to_string(glm::degrees(ring->angle())) : std::string{"none"}) << " ring_player=" << r.x << "," << r.y << "," << r.z;
+
+            // The game camera: how far it is from our character and its field of view (complaint 2026-10-22: the
+            // camera came closer in the flight).
+            if (const auto camera = sdk::CameraGame::get(); camera != nullptr && camera->data != nullptr) {
+                const auto& view = *(Matrix4x4f*)&camera->data->view;
+                const Vector3f origin{view[3].x, view[3].y, view[3].z};
+                const Vector3f character{p.x, p.y, p.z};
+                s << " cam=" << origin.x << "," << origin.y << "," << origin.z << " cam_dist=" << glm::length(origin - character)
+                  << " fov=" << glm::degrees(camera->fov);
+            }
         } else {
             s << " player=none";
         }

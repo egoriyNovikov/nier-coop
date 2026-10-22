@@ -1391,7 +1391,7 @@ bool NierClient::is_waiting_for_host() {
 }
 
 void NierClient::try_coop_swap() {
-    if (m_is_master_client || !auto_swap_character || m_swap_pending) {
+    if (m_is_master_client || !auto_swap_character || !research_swap || m_swap_pending) {
         return;
     }
 
@@ -1542,7 +1542,18 @@ void NierClient::sync_puppets() {
                 return it.second != nullptr && it.first != m_guid && it.second->get_handle() == buddy_handle;
             });
 
-            if (possessed != nullptr && buddy_is_puppet && npc->isSuspend() == 0) {
+            const auto flying = possessed != nullptr && get_ridden_flight_unit(possessed->behavior->as<sdk::Pl0000>()) != nullptr;
+
+            if (possessed != nullptr && buddy_is_puppet && npc->isSuspend() == 0 && !flying) {
+                continue;
+            }
+
+            if (flying) {
+                // The flight's script waits for the buddy's AI: with the puppet in its place the flight never turned
+                // into the battle from above (camera stayed close, the unit stayed a mech, smoke runs 2026-10-22).
+                spdlog::info("[Coop] We fly: the story buddy of {} goes back to the game, only its Flight Unit follows them", player->get_name());
+                release_puppet(*player);
+                m_next_bind_attempt[guid] = now + std::chrono::seconds(2);
                 continue;
             }
 
@@ -1582,6 +1593,11 @@ bool NierClient::bind_puppet(Player& player) {
 
     auto local = possessed->behavior->as<sdk::Pl0000>();
 
+    // In a flight the buddy stays the game's, smooth_puppet_positions moves its Flight Unit (TASKS 1.3.13).
+    if (get_ridden_flight_unit(local) != nullptr) {
+        return false;
+    }
+
     // TASKS 3.1.1: on different routes the other player plays somebody else's story (route A 2B and 9S, route B the
     // other way round), taking over would pull the wrong character out of our scene. The route comes with the first
     // story state, until then nothing is taken over.
@@ -1602,7 +1618,7 @@ bool NierClient::bind_puppet(Player& player) {
     m_route_block_logged.clear();
 
     // Preferred: the buddy the game already gave us (9S next to 2B and so on).
-    if (use_story_buddy) {
+    if (use_story_buddy && research_takeover) {
         auto buddy = entity_list->get_by_handle(local->buddy_handle());
 
         const auto taken = buddy != nullptr && std::any_of(m_players.begin(), m_players.end(), [&](auto& it) {
@@ -2237,6 +2253,32 @@ void NierClient::smooth_puppet_positions() {
             continue;
         }
 
+        // TASKS 1.3.13, decision 2026-10-21: in a flight the buddy is the game's and sits on its Flight Unit, which the
+        // game's AI flies in formation; the unit flies to where the other player is (both games fly in the same frame
+        // of the flight, smoke run 2026-10-22). The AI pulls it ~0.3 m a frame (smoothed it stayed 2 m off), so the
+        // position is set every frame.
+        if (const auto unit = follow_flight_units ? get_buddy_flight_unit() : nullptr; unit != nullptr || m_puppet_flight_unit != 0) {
+            const auto handle = unit != nullptr ? unit->handle : 0;
+
+            if (handle != m_puppet_flight_unit) {
+                if (handle != 0) {
+                    spdlog::info("[Coop] {} flies: the buddy's Flight Unit {:x} follows them", player->get_name(), handle);
+                } else {
+                    spdlog::info("[Coop] The flight is over, the buddy's Flight Unit {:x} is the game's again", m_puppet_flight_unit);
+                }
+
+                m_puppet_flight_unit = handle;
+            }
+
+            if (unit != nullptr) {
+                if (const auto target = remote_position(*player); is_finite(target)) {
+                    unit->behavior->position() = target;
+                }
+
+                continue;
+            }
+        }
+
         auto npc = player->get_entity();
 
         if (npc == nullptr || is_local_character(npc)) {
@@ -2248,22 +2290,7 @@ void NierClient::smooth_puppet_positions() {
         // so the puppet trails the remote player by that much instead of jumping back and forth.
         const auto target = remote_position(*player);
 
-        // TASKS 1.3.13, decision 2026-10-21: in a flight both games fly two Flight Units, and the puppet sits on its
-        // unit, which the game's AI flies in formation. Moving the rider does nothing, so the unit flies to where
-        // the other player is (both games fly in the same frame of the flight, smoke run 2026-10-22).
-        auto flight_unit = get_ridden_flight_unit(npc);
-
-        if ((flight_unit != nullptr) != (m_puppet_flight_unit != 0)) {
-            if (flight_unit != nullptr) {
-                m_puppet_flight_unit = npc->flight_unit_handle();
-                spdlog::info("[Coop] {} flies: their Flight Unit {:x} follows them", player->get_name(), m_puppet_flight_unit);
-            } else {
-                spdlog::info("[Coop] {} got off the Flight Unit {:x}", player->get_name(), m_puppet_flight_unit);
-                m_puppet_flight_unit = 0;
-            }
-        }
-
-        auto& position = flight_unit != nullptr ? flight_unit->position() : npc->position();
+        auto& position = npc->position();
         const auto error = target - position;
         const auto distance = glm::length(error);
 
@@ -2272,13 +2299,7 @@ void NierClient::smooth_puppet_positions() {
         ++m_stat_position_samples;
 
         // A NaN position never comes back by itself, the distance is NaN too.
-        if (flight_unit != nullptr) {
-            // A Flight Unit takes a written position (checked 2026-10-22 with the bot's move), and its AI pulls it
-            // to its place in the formation by about 0.3 m a frame: smoothed, the unit stayed 2 m off. Every frame.
-            if (std::isfinite(distance)) {
-                position = target;
-            }
-        } else if (distance > snap_distance || !std::isfinite(distance)) {
+        if (distance > snap_distance || !std::isfinite(distance)) {
             // Writing the position alone does not move the character's physics: the puppet stayed where it was
             // and ran around there for seconds, then ended up below the floor (smoke run 2026-10-21, the host
             // teleported to the Commander). The game's own teleport resets both, as the bot's goto does.
@@ -2306,6 +2327,25 @@ sdk::Behavior* NierClient::get_ridden_flight_unit(sdk::Pl0000* npc) const {
 
     // On it: in flight the puppet hangs about 1.1 m above its unit (smoke run 2026-10-22).
     return glm::length(unit->behavior->position() - npc->position()) < 3.0f ? unit->behavior : nullptr;
+}
+
+sdk::Entity* NierClient::get_buddy_flight_unit() const {
+    const auto entity_list = sdk::EntityList::get();
+    const auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (possessed == nullptr || possessed->behavior == nullptr || !possessed->behavior->is_pl0000() ||
+        get_ridden_flight_unit(possessed->behavior->as<sdk::Pl0000>()) == nullptr) {
+        return nullptr;
+    }
+
+    const auto buddy = entity_list->get_by_handle(possessed->behavior->as<sdk::Pl0000>()->buddy_handle());
+
+    if (buddy == nullptr || buddy->behavior == nullptr || !buddy->behavior->is_pl0000() ||
+        get_ridden_flight_unit(buddy->behavior->as<sdk::Pl0000>()) == nullptr) {
+        return nullptr;
+    }
+
+    return entity_list->get_by_handle(buddy->behavior->as<sdk::Pl0000>()->flight_unit_handle());
 }
 
 Vector3f NierClient::remote_position(Player& player) const {

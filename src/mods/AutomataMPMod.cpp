@@ -627,6 +627,12 @@ bool AutomataMPMod::set_coop_option(std::string_view name, bool value) {
         m_coop_share_story = value;
     } else if (name == "share_enemy_deaths") {
         m_coop_share_enemy_deaths = value;
+    } else if (name == "takeover") {
+        NierClient::research_takeover = value;
+    } else if (name == "swap") {
+        NierClient::research_swap = value;
+    } else if (name == "flight_follow") {
+        NierClient::follow_flight_units = value;
     } else if (name == "trace_scripts") {
         m_trace_scripts = value;
         ScriptTracer::get().set_enabled(value);
