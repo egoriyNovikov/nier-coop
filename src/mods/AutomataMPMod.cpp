@@ -646,7 +646,7 @@ void AutomataMPMod::on_think() {
     StoryActionSync::get().update();
 
     if (m_client == nullptr) {
-        PhaseRequestGate::get().set_leader(false, {});
+        PhaseRequestGate::get().set_leader(false, {}, 0);
     }
 
     PhaseRequestGate::get().update();

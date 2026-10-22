@@ -97,8 +97,20 @@ func (rcv *StoryState) Character() []byte {
 	return nil
 }
 
+func (rcv *StoryState) PhaseRequests() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *StoryState) MutatePhaseRequests(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(16, n)
+}
+
 func StoryStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(7)
 }
 func StoryStateAddPhase(builder *flatbuffers.Builder, phase flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(phase), 0)
@@ -117,6 +129,9 @@ func StoryStateAddRoute(builder *flatbuffers.Builder, route byte) {
 }
 func StoryStateAddCharacter(builder *flatbuffers.Builder, character flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(character), 0)
+}
+func StoryStateAddPhaseRequests(builder *flatbuffers.Builder, phaseRequests uint32) {
+	builder.PrependUint32Slot(6, phaseRequests, 0)
 }
 func StoryStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

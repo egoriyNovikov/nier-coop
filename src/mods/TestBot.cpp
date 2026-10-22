@@ -394,6 +394,22 @@ void TestBot::start(const Command& command) {
         } else if (command.verb == "option") {
             const auto set = AutomataMPMod::get()->set_coop_option(command.arg1, command.arg2 != "0");
             finish(set ? "ok " + command.text : "error option: unknown option " + command.arg1);
+        } else if (command.verb == "move") {
+            // move <hex handle> x y z: put an entity there (behavior position, on the game thread); prints its class.
+            const auto handle = (uint32_t)std::stoul(command.arg1, nullptr, 16);
+            const Vector3f target{std::stof(command.arg2), std::stof(command.arg3), std::stof(command.arg4)};
+            std::string name{};
+            run_on_game_thread([&] {
+                const auto entity_list = sdk::EntityList::get();
+                const auto entity = entity_list != nullptr ? entity_list->get_by_handle(handle) : nullptr;
+
+                if (entity != nullptr && entity->behavior != nullptr) {
+                    entity->behavior->position() = target;
+                    const auto ti = utility::rtti::get_type_info(entity->behavior);
+                    name = ti != nullptr ? ti->name() : "?";
+                }
+            }, std::chrono::seconds{3});
+            finish(name.empty() ? "error move: no entity" : "ok " + command.text + " (" + name + ")");
         } else if (command.verb == "ring") {
             // ring <degrees>: turn the Bunker's ring (sdk::BunkerRing::set_angle).
             static uint32_t ring_handle{0};

@@ -20,8 +20,14 @@ public:
     void install();
 
     // Game thread, every think while in a session. hold: we follow the host's story. leader_phase: the host's phase,
-    // empty if unknown.
-    void set_leader(bool hold, const std::string& leader_phase);
+    // empty if unknown. leader_requests: how many story blocks the host's game has loaded (its passed_requests()).
+    void set_leader(bool hold, const std::string& leader_phase, uint32_t leader_requests);
+
+    // Requests for the next story block this game let through since it started; the host sends it in its story state.
+    uint32_t passed_requests() {
+        std::scoped_lock _{m_mutex};
+        return m_passed;
+    }
 
     // Game thread, every think. Lets a held request through when its time has come.
     void update();
@@ -45,9 +51,13 @@ private:
     uintptr_t m_story_caller{};
     bool m_hold{false};
     std::string m_leader_phase{};
+    uint32_t m_leader_requests{0};
+    Clock::time_point m_leader_requests_changed_at{};
+    uint32_t m_passed{0};
 
     bool m_held{false};
     std::string m_held_phase{};        // our phase when the request came
     std::string m_held_leader_phase{}; // the host's phase then
+    uint32_t m_held_leader_requests{0}; // the host's loaded blocks then
     Clock::time_point m_held_at{};
 };

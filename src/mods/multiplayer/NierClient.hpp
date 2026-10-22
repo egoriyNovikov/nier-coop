@@ -220,6 +220,8 @@ private:
     // Positions go over the network in the frame of the Bunker's ring while there is one (sdk::BunkerRing):
     // the other player's position as a world position of our game.
     Vector3f remote_position(Player& player) const;
+    // The Flight Unit the puppet sits on in a flight, nullptr if it isn't on one (TASKS 1.3.13).
+    sdk::Behavior* get_ridden_flight_unit(sdk::Pl0000* npc) const;
     void update_bunker_ring();
     // The host sends the angle of its ring, the client turns its own ring the same (ID_BUNKER_RING).
     void send_bunker_ring();
@@ -231,6 +233,7 @@ private:
     EnemyDeathSync m_enemy_deaths{};
     // Deaths from the other game, applied in think() on the game thread.
     StoryWatcher::Point m_sent_story{};
+    uint32_t m_sent_phase_requests{0};
     std::chrono::steady_clock::time_point m_next_story_send{};
     // A client that came into our phase and waits for the story actions finished in it before (name for the log).
     std::string m_story_catch_up{};
@@ -286,6 +289,7 @@ private:
     float m_sent_ring_angle{0.0f};
     std::chrono::steady_clock::time_point m_sent_ring_time{};
     bool m_following_host_ring{false};
+    uint32_t m_puppet_flight_unit{0}; // the puppet's Flight Unit we move, for the log
     // The player whose story buddy we don't take over because the routes differ, logged once.
     std::string m_route_block_logged{};
     float m_stat_position_error_sum{0.0f};

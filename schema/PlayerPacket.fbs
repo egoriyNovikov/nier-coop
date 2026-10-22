@@ -37,6 +37,7 @@ table StoryState {
     event: uint; // story event (cutscene) playing now, ev%04x; 0 if none
     route: ubyte; // 'A', 'B', 'C' (scene state flags Route/A..C); 0 if unknown. Added in 3.2, older builds send 0
     character: string; // hero of the route: "2B", "9S", "A2" (scene state flags PL/..)
+    phase_requests: uint; // story blocks the sender's game asked for and loaded since it started (PhaseRequestGate). Added in 3.4
 }
 
 // An action of a story script graph (hap::Action) finished in the sender's game (src/mods/multiplayer/StoryActionSync.hpp).

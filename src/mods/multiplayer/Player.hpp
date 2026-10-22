@@ -74,6 +74,7 @@ public:
         uint32_t event{0}; // cutscene playing in that game, ev%04x; 0 if none
         char route{0}; // 'A', 'B', 'C'; 0 if unknown (older builds)
         std::string character{}; // hero of the route: "2B", "9S", "A2"
+        uint32_t phase_requests{0}; // story blocks that game loaded (PhaseRequestGate::passed_requests)
         bool known{false};
     };
 

@@ -19,6 +19,7 @@ import argparse
 import re
 import subprocess
 import sys
+import time
 
 import bot
 
@@ -406,6 +407,54 @@ def hangar(expect):
     for line in log_text(CLIENT).splitlines():
         if any(k in line for k in ("[StoryAction] Finished", "skipped", "[Story] Phase")):
             print("    client log: " + line.split("] ", 2)[-1])
+    fly_together(expect)
+
+
+def entities(slot, commands=()):
+    """Output of `commands` + `entities 3000`, read until the whole list is there (bot.cmd returns as soon as it has
+    as many lines as commands, the list can come cut)."""
+    root = bot.slot_dir(slot)
+    before = len(bot.out_lines(root))
+    bot.cmd(slot, list(commands) + ["entities 3000"], quiet=True)
+    for _ in range(50):
+        lines = bot.out_lines(root)[before:]
+        if any(l.startswith("ok entities") for l in lines):
+            return lines
+        time.sleep(0.1)
+    return bot.out_lines(root)[before:]
+
+
+def fly_together(expect):
+    """TASKS 1.3.13, decision 2026-10-21: in the flight from the Bunker each game flies two Flight Units, the other
+    player's puppet sits on one that the game's AI flew in formation (owner's report 2026-10-21: they fly apart).
+    Asserts that in each game the puppet's unit is where the other player is, and that the client's game does not
+    wait in the dark for the next block of the flight (20_AB_buker_Aerial_battle is loaded again under the same name;
+    before 2026-10-22 the client's held phase request waited for a phase name change that never came)."""
+    errors = {HOST: [], CLIENT: []}
+    for _ in range(12):
+        for slot in (HOST, CLIENT):
+            lines = entities(slot, ["state", "coop"])
+            me, net = position(parse(lines[0], "player")), position(parse(lines[1], "pos"))
+            units = [position(l.split(" pos=")[1].split()[0]) for l in lines if l.startswith("entity") and " model=10010 " in l]
+            units = [u for u in units if me and abs(u[0]) < 100]
+            if me and net and len(units) >= 2:
+                other = max(units, key=lambda u: sum((a - b) ** 2 for a, b in zip(u, me)))
+                errors[slot].append(sum((a - b) ** 2 for a, b in zip(other, net)) ** 0.5)
+        bot.cmd(HOST, ["wait 1500"], quiet=True)
+    bot.cmd(HOST, ["shot fly_host"], quiet=True)
+    bot.cmd(CLIENT, ["shot fly_client"], quiet=True)
+    for slot, who in ((HOST, "the client's"), (CLIENT, "the host's")):
+        e = sorted(errors[slot])
+        median = e[len(e) // 2] if e else None
+        print(f"  observed: {slot} puppet unit off the network position: {[round(x, 2) for x in e]}")
+        expect(len(e) >= 6 and median < 1.0,
+               f"in {slot}'s game {who} Flight Unit flies where that player is (median {median if median is None else round(median, 2)} m of {len(e)})")
+    held = [l for l in log_text(CLIENT).splitlines() if "Client tried to change phase" in l]
+    released = [l for l in log_text(CLIENT).splitlines() if "Letting the held phase request" in l]
+    print(f"  observed: the client's phase requests held {len(held)}, let through {len(released)}")
+    state = bot.cmd(CLIENT, ["state"], quiet=True)[-1]
+    expect(parse(state, "phase_held") == "0" or len(released) >= len(held) - 1,
+           f"the client's game is not stuck with a held phase request (held {len(held)}, let through {len(released)})")
 
 
 if __name__ == "__main__":

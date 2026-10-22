@@ -404,7 +404,7 @@ void NierClient::think() {
         std::scoped_lock __{m_players_mutex};
         const auto host = get_host_player();
         const auto follow = is_connected() && m_welcome_received && !m_is_master_client && share_story_actions && host != nullptr;
-        PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{});
+        PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{}, follow ? host->get_story().phase_requests : 0);
     }
 
     // Also when the session is gone: then the ring turns on its own again.
@@ -2026,7 +2026,9 @@ void NierClient::send_story_state() {
     const auto point = StoryWatcher::get().current();
     const auto now = std::chrono::steady_clock::now();
 
-    if (point == m_sent_story && now < m_next_story_send) {
+    const auto phase_requests = PhaseRequestGate::get().passed_requests();
+
+    if (point == m_sent_story && phase_requests == m_sent_phase_requests && now < m_next_story_send) {
         return;
     }
 
@@ -2040,10 +2042,12 @@ void NierClient::send_story_state() {
     data_builder.add_event(point.event);
     data_builder.add_route((uint8_t)point.route);
     data_builder.add_character(character);
+    data_builder.add_phase_requests(phase_requests);
     builder.Finish(data_builder.Finish());
 
     send_packet(nier::PacketType_ID_STORY_STATE, builder.GetBufferPointer(), builder.GetSize());
     m_sent_story = point;
+    m_sent_phase_requests = phase_requests;
     m_next_story_send = now + RESEND;
 }
 
@@ -2076,6 +2080,7 @@ bool NierClient::handle_story_state(const nier::PlayerPacket* packet) {
     story.event = data->event();
     story.route = (char)data->route();
     story.character = data->character() != nullptr ? data->character()->str() : "";
+    story.phase_requests = data->phase_requests();
     story.known = true;
 
     if (story.event != player.get_story().event) {
@@ -2242,7 +2247,23 @@ void NierClient::smooth_puppet_positions() {
         // removes the drift between that and the remote player. The target lags by the network latency,
         // so the puppet trails the remote player by that much instead of jumping back and forth.
         const auto target = remote_position(*player);
-        auto& position = npc->position();
+
+        // TASKS 1.3.13, decision 2026-10-21: in a flight both games fly two Flight Units, and the puppet sits on its
+        // unit, which the game's AI flies in formation. Moving the rider does nothing, so the unit flies to where
+        // the other player is (both games fly in the same frame of the flight, smoke run 2026-10-22).
+        auto flight_unit = get_ridden_flight_unit(npc);
+
+        if ((flight_unit != nullptr) != (m_puppet_flight_unit != 0)) {
+            if (flight_unit != nullptr) {
+                m_puppet_flight_unit = npc->flight_unit_handle();
+                spdlog::info("[Coop] {} flies: their Flight Unit {:x} follows them", player->get_name(), m_puppet_flight_unit);
+            } else {
+                spdlog::info("[Coop] {} got off the Flight Unit {:x}", player->get_name(), m_puppet_flight_unit);
+                m_puppet_flight_unit = 0;
+            }
+        }
+
+        auto& position = flight_unit != nullptr ? flight_unit->position() : npc->position();
         const auto error = target - position;
         const auto distance = glm::length(error);
 
@@ -2251,7 +2272,13 @@ void NierClient::smooth_puppet_positions() {
         ++m_stat_position_samples;
 
         // A NaN position never comes back by itself, the distance is NaN too.
-        if (distance > snap_distance || !std::isfinite(distance)) {
+        if (flight_unit != nullptr) {
+            // A Flight Unit takes a written position (checked 2026-10-22 with the bot's move), and its AI pulls it
+            // to its place in the formation by about 0.3 m a frame: smoothed, the unit stayed 2 m off. Every frame.
+            if (std::isfinite(distance)) {
+                position = target;
+            }
+        } else if (distance > snap_distance || !std::isfinite(distance)) {
             // Writing the position alone does not move the character's physics: the puppet stayed where it was
             // and ran around there for seconds, then ended up below the floor (smoke run 2026-10-21, the host
             // teleported to the Commander). The game's own teleport resets both, as the bot's goto does.
@@ -2262,6 +2289,23 @@ void NierClient::smooth_puppet_positions() {
             position += error * blend;
         }
     }
+}
+
+sdk::Behavior* NierClient::get_ridden_flight_unit(sdk::Pl0000* npc) const {
+    // Outside the Bunker only: in the hangar the units stand next to their pilots before the launch.
+    if (m_bunker_ring || npc == nullptr) {
+        return nullptr;
+    }
+
+    const auto entity_list = sdk::EntityList::get();
+    const auto unit = entity_list != nullptr && npc->flight_unit_handle() != 0 ? entity_list->get_by_handle(npc->flight_unit_handle()) : nullptr;
+
+    if (unit == nullptr || unit->behavior == nullptr || unit->behavior->model_index() != sdk::EModel::MODEL_FLIGHT_UNIT) {
+        return nullptr;
+    }
+
+    // On it: in flight the puppet hangs about 1.1 m above its unit (smoke run 2026-10-22).
+    return glm::length(unit->behavior->position() - npc->position()) < 3.0f ? unit->behavior : nullptr;
 }
 
 Vector3f NierClient::remote_position(Player& player) const {
