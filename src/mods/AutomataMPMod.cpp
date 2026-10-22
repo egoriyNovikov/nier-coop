@@ -18,6 +18,7 @@
 #include <sdk/ScriptFunctions.hpp>
 #include "AutomataMPMod.hpp"
 #include "Version.hpp"
+#include "multiplayer/BunkerRingHold.hpp"
 #include "multiplayer/PhaseRequestGate.hpp"
 #include "multiplayer/ScriptTracer.hpp"
 #include "multiplayer/StoryActionSync.hpp"
@@ -62,6 +63,7 @@ std::optional<std::string> AutomataMPMod::on_initialize() try {
     enetpp::global_state::get().initialize();
     StoryActionSync::get().install();
     PhaseRequestGate::get().install();
+    BunkerRingHold::get().install();
 
     spdlog::info("Leaving AutomataMPMod.");
 
@@ -252,6 +254,9 @@ std::string AutomataMPMod::describe_coop() {
     s << " connected=" << m_client->is_connected() << " session=" << m_client->is_in_session()
       << " in_world=" << m_client->is_in_world() << " master=" << m_client->is_master_client()
       << " guid=" << m_client->get_guid();
+
+    const auto mismatch = m_client->story_mismatch();
+    s << " mismatch=" << (mismatch == NierClient::StoryMismatch::routes ? "routes" : mismatch == NierClient::StoryMismatch::phases ? "phases" : "none");
 
     for (const auto& [guid, player] : m_client->get_players()) {
         if (player == nullptr || guid == m_client->get_guid()) {
@@ -452,6 +457,14 @@ void AutomataMPMod::display_coop() {
                 ImGui::TextWrapped("Story: %s is in the same phase", name.c_str());
             }
         }
+
+        // TASKS 3.1.2: no pulling together yet (3.3 postponed), only the message.
+        if (const auto mismatch = m_client->story_mismatch(); mismatch != NierClient::StoryMismatch::none) {
+            ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.2f, 1.0f}, "You are on different story lines.");
+            ImGui::TextWrapped(mismatch == NierClient::StoryMismatch::routes
+                ? "Your games are on different routes: the partner's character is not taken over. Both load the same save to play together."
+                : "Your games are at different points of the story. Both load the same save (the host's) to play together.");
+        }
     }
 
     const auto busy = m_client != nullptr || m_pending_connect.has_value();
@@ -584,15 +597,25 @@ void AutomataMPMod::on_frame() {
 
     update_connection();
 
-    const char* state = "Disconnected";
+    std::string state = "Disconnected";
+    auto mismatch = NierClient::StoryMismatch::none;
 
     if (m_client && m_client->is_in_session()) {
         state = m_client->is_master_client() ? "Co-op: Host" : "Co-op: Client";
+        mismatch = m_client->story_mismatch();
     } else if (m_client || m_pending_connect) {
         state = "Co-op: Connecting";
     }
 
-    ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), state);
+    ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, 0), ImGui::GetColorU32(ImGuiCol_Text), state.c_str());
+
+    // TASKS 3.1.2: also on screen, the Co-op menu is usually closed.
+    if (mismatch != NierClient::StoryMismatch::none) {
+        const auto text = mismatch == NierClient::StoryMismatch::routes
+            ? "You are on different story lines (different routes): the partner is not taken over"
+            : "You are on different story lines: load the same save to play together";
+        ImGui::GetBackgroundDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(0, ImGui::GetFontSize() + 2.0f), 0xFF3366FF, text);
+    }
 
     if (m_client && !m_wants_destroy_client) {
         m_client->on_frame();
@@ -604,6 +627,9 @@ bool AutomataMPMod::set_coop_option(std::string_view name, bool value) {
         m_coop_share_story = value;
     } else if (name == "share_enemy_deaths") {
         m_coop_share_enemy_deaths = value;
+    } else if (name == "trace_scripts") {
+        m_trace_scripts = value;
+        ScriptTracer::get().set_enabled(value);
     } else {
         return false;
     }

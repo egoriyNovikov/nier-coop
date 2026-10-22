@@ -29,6 +29,8 @@ func PacketHandler(server *structs.Server, connection *structs.Connection, sende
 		HandleStoryState(server, sender, connection, packetData)
 	case nier.PacketTypeID_STORY_ACTION:
 		HandleStoryAction(server, sender, connection, packetData)
+	case nier.PacketTypeID_BUNKER_RING:
+		HandleBunkerRing(server, sender, connection, packetData)
 	case nier.PacketTypeID_LOG_CHUNK:
 		HandleLogChunk(server, sender, connection, packetData)
 	case nier.PacketTypeID_SPAWN_ENTITY:

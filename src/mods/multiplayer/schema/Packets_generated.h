@@ -46,6 +46,8 @@ struct StoryStateBuilder;
 struct StoryAction;
 struct StoryActionBuilder;
 
+struct BunkerRing;
+
 struct Buttons;
 struct ButtonsBuilder;
 
@@ -81,7 +83,8 @@ enum PacketType : uint32_t {
   PacketType_ID_LOG_CHUNK = 4102,
   PacketType_ID_STORY_STATE = 4103,
   PacketType_ID_STORY_ACTION = 4104,
-  PacketType_ID_CLIENT_END = 4105,
+  PacketType_ID_BUNKER_RING = 4105,
+  PacketType_ID_CLIENT_END = 4106,
   PacketType_ID_PING = 32768,
   PacketType_ID_PONG = 32769,
   PacketType_ID_HELLO = 32770,
@@ -90,7 +93,7 @@ enum PacketType : uint32_t {
   PacketType_MAX = PacketType_ID_WELCOME
 };
 
-inline const PacketType (&EnumValuesPacketType())[26] {
+inline const PacketType (&EnumValuesPacketType())[27] {
   static const PacketType values[] = {
     PacketType_ID_MASTER_CLIENT_START,
     PacketType_ID_SPAWN_ENTITY,
@@ -113,6 +116,7 @@ inline const PacketType (&EnumValuesPacketType())[26] {
     PacketType_ID_LOG_CHUNK,
     PacketType_ID_STORY_STATE,
     PacketType_ID_STORY_ACTION,
+    PacketType_ID_BUNKER_RING,
     PacketType_ID_CLIENT_END,
     PacketType_ID_PING,
     PacketType_ID_PONG,
@@ -145,6 +149,7 @@ inline const char *EnumNamePacketType(PacketType e) {
     case PacketType_ID_LOG_CHUNK: return "ID_LOG_CHUNK";
     case PacketType_ID_STORY_STATE: return "ID_STORY_STATE";
     case PacketType_ID_STORY_ACTION: return "ID_STORY_ACTION";
+    case PacketType_ID_BUNKER_RING: return "ID_BUNKER_RING";
     case PacketType_ID_CLIENT_END: return "ID_CLIENT_END";
     case PacketType_ID_PING: return "ID_PING";
     case PacketType_ID_PONG: return "ID_PONG";
@@ -182,7 +187,7 @@ inline const char *EnumNameVersionMajor(VersionMajor e) {
 }
 
 enum VersionMinor : uint32_t {
-  VersionMinor_Value = 3,
+  VersionMinor_Value = 4,
   VersionMinor_MIN = VersionMinor_Value,
   VersionMinor_MAX = VersionMinor_Value
 };
@@ -634,6 +639,23 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) EnemyDied FLATBUFFERS_FINAL_CLASS {
   }
 };
 FLATBUFFERS_STRUCT_END(EnemyDied, 28);
+
+FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) BunkerRing FLATBUFFERS_FINAL_CLASS {
+ private:
+  float angle_;
+
+ public:
+  BunkerRing()
+      : angle_(0) {
+  }
+  BunkerRing(float _angle)
+      : angle_(flatbuffers::EndianScalar(_angle)) {
+  }
+  float angle() const {
+    return flatbuffers::EndianScalar(angle_);
+  }
+};
+FLATBUFFERS_STRUCT_END(BunkerRing, 4);
 
 FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(8) DestroyPlayer FLATBUFFERS_FINAL_CLASS {
  private:

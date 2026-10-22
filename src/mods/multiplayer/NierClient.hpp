@@ -1,13 +1,17 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 #include <enetpp/client.h>
+
+#include <sdk/Bunker.hpp>
 
 #include "Player.hpp"
 #include "StoryActionSync.hpp"
@@ -94,6 +98,38 @@ public:
         return m_is_master_client;
     }
 
+    // Are the two games at the same story point (TASKS 3.1.1, 3.1.2; co-op concept 6 point 5). A route or phase that
+    // one side doesn't know yet is not a difference.
+    enum class StoryMismatch { none, phases, routes };
+
+    static StoryMismatch compare_stories(const StoryWatcher::Point& ours, const Player::Story& theirs) {
+        if (!theirs.known) {
+            return StoryMismatch::none;
+        }
+
+        if (ours.route != 0 && theirs.route != 0 && ours.route != theirs.route) {
+            return StoryMismatch::routes;
+        }
+
+        if (!ours.phase.empty() && !theirs.phase.empty() && ours.phase != theirs.phase) {
+            return StoryMismatch::phases;
+        }
+
+        return StoryMismatch::none;
+    }
+
+    // The worst difference to any other player, safe from any thread.
+    StoryMismatch story_mismatch() {
+        const auto ours = StoryWatcher::get().current();
+        auto worst = StoryMismatch::none;
+
+        for (const auto& [name, story] : get_other_stories()) {
+            worst = std::max(worst, compare_stories(ours, story));
+        }
+
+        return worst;
+    }
+
     // Name and story point of every other player, safe from any thread.
     std::vector<std::pair<std::string, Player::Story>> get_other_stories() {
         std::scoped_lock _{m_players_mutex};
@@ -152,6 +188,7 @@ private:
     bool handle_enemy_died(const nier::PlayerPacket* packet);
     bool handle_story_state(const nier::PlayerPacket* packet);
     bool handle_story_action(const nier::PlayerPacket* packet);
+    bool handle_bunker_ring(const nier::PlayerPacket* packet);
 
     void send_enemy_died(const EnemyDeathSync::Death& death);
     void send_story_state();
@@ -180,6 +217,13 @@ private:
     void watch_local_character();
     // The character we control right now, never driven as a puppet.
     bool is_local_character(const sdk::Pl0000* npc) const;
+    // Positions go over the network in the frame of the Bunker's ring while there is one (sdk::BunkerRing):
+    // the other player's position as a world position of our game.
+    Vector3f remote_position(Player& player) const;
+    void update_bunker_ring();
+    // The host sends the angle of its ring, the client turns its own ring the same (ID_BUNKER_RING).
+    void send_bunker_ring();
+    void follow_host_bunker_ring();
     void log_animation_stats();
 
     std::unique_ptr<EntitySync> m_network_entities{};
@@ -233,6 +277,17 @@ private:
 
     // Position smoothing (smooth_puppet_positions), logged with the [Anim] line.
     std::chrono::steady_clock::time_point m_last_smooth_time{};
+    // The Bunker's ring of this frame (update_bunker_ring), nullopt outside the Bunker.
+    std::optional<sdk::BunkerRing> m_bunker_ring{};
+    uint32_t m_bunker_handle{0};
+    uint32_t m_bunker_search_frames{0};
+    std::optional<float> m_host_ring_angle{};
+    std::chrono::steady_clock::time_point m_host_ring_time{};
+    float m_sent_ring_angle{0.0f};
+    std::chrono::steady_clock::time_point m_sent_ring_time{};
+    bool m_following_host_ring{false};
+    // The player whose story buddy we don't take over because the routes differ, logged once.
+    std::string m_route_block_logged{};
     float m_stat_position_error_sum{0.0f};
     float m_stat_position_error_max{0.0f};
     uint32_t m_stat_position_samples{0};

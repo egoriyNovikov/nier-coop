@@ -7,7 +7,7 @@ import "strconv"
 type VersionMinor uint32
 
 const (
-	VersionMinorValue VersionMinor = 3
+	VersionMinorValue VersionMinor = 4
 )
 
 var EnumNamesVersionMinor = map[VersionMinor]string{

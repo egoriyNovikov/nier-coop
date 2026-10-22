@@ -48,6 +48,12 @@ table StoryAction {
     state: uint; // the state it finished with: 0x26b80d1f for most actions, an AreaAction ends with 0x4a063532
 }
 
+// The Bunker's ring in the sender's game (the host), sdk::BunkerRing: the ring turns under the hero, so each game
+// turns it differently; the client keeps its ring at the host's angle. Added in 3.4.
+struct BunkerRing {
+    angle: float; // radians
+}
+
 table Buttons {
     buttons: [uint]; // 8 buttons
 }

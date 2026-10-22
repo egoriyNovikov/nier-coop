@@ -11,6 +11,7 @@
 #include <wrl.h>
 #include <spdlog/spdlog.h>
 
+#include <sdk/Bunker.hpp>
 #include <sdk/Entity.hpp>
 #include <sdk/EntityList.hpp>
 #include <sdk/Game.hpp>
@@ -393,6 +394,12 @@ void TestBot::start(const Command& command) {
         } else if (command.verb == "option") {
             const auto set = AutomataMPMod::get()->set_coop_option(command.arg1, command.arg2 != "0");
             finish(set ? "ok " + command.text : "error option: unknown option " + command.arg1);
+        } else if (command.verb == "ring") {
+            // ring <degrees>: turn the Bunker's ring (sdk::BunkerRing::set_angle).
+            static uint32_t ring_handle{0};
+            bool set{false};
+            run_on_game_thread([&] { set = sdk::BunkerRing::set_angle(ring_handle, glm::radians(std::stof(command.arg1))); }, std::chrono::seconds{3});
+            finish(set ? "ok " + command.text : "error ring: not in the Bunker");
         } else if (command.verb == "setstep") {
             finish(sdk::set_phase_step(std::stoi(command.arg1)) ? "ok " + command.text : "error setstep: no setter");
         } else if (command.verb == "hits") {
@@ -598,6 +605,12 @@ std::string TestBot::describe_state() {
         if (player != nullptr && player->behavior != nullptr) {
             const auto& p = player->behavior->position();
             s << " player=" << p.x << "," << p.y << "," << p.z << " model=" << std::hex << (uint32_t)player->behavior->model_index() << std::dec;
+            // In the Bunker each game turns its ring differently: compare positions of two games in the ring's frame
+            // (what goes over the network, sdk::BunkerRing). Outside the Bunker ring_player is the same as player.
+            static uint32_t ring_handle{0};
+            const auto ring = sdk::BunkerRing::find(ring_handle);
+            const auto r = ring ? ring->to_ring(p) : p;
+            s << " ring=" << (ring ? std::to_string(glm::degrees(ring->angle())) : std::string{"none"}) << " ring_player=" << r.x << "," << r.y << "," << r.z;
         } else {
             s << " player=none";
         }

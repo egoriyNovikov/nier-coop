@@ -164,7 +164,9 @@ def together(expect):
 
     # Each game's view of the other player against where the other game says its player is.
     for viewer, view, other, other_state in ((HOST, host_coop, CLIENT, client_state), (CLIENT, client_coop, HOST, host_state)):
-        seen, actual = position(parse(view, "pos")), position(parse(other_state, "player"))
+        # pos= is what came over the network: in the Bunker that is the ring's frame (each game turns its ring
+        # differently, sdk::BunkerRing), so compare it with the other game's ring_player.
+        seen, actual = position(parse(view, "pos")), position(parse(other_state, "ring_player") or parse(other_state, "player"))
         distance = sum((a - b) ** 2 for a, b in zip(seen, actual)) ** 0.5 if seen and actual else None
         expect(distance is not None and distance < 3.0,
                f"{viewer} sees {other} where {other} is (distance {distance if distance is None else round(distance, 2)} m)")
@@ -197,6 +199,9 @@ def diverged(expect):
     # handle=0: no puppet bound for the other player (the 50 m rule in NierClient::bind_puppet).
     expect(parse(host_coop, "handle") == "0", f"the host's buddy is not taken over (handle {parse(host_coop, 'handle')})")
     expect(parse(client_coop, "handle") == "0", f"the client's buddy is not taken over (handle {parse(client_coop, 'handle')})")
+    # TASKS 3.1.2: the message in the Co-op menu and on screen (screenshots diverged_*).
+    expect(parse(host_coop, "mismatch") == "phases" and parse(client_coop, "mismatch") == "phases",
+           f"both say: different story lines, different phases ({parse(host_coop, 'mismatch')} / {parse(client_coop, 'mismatch')})")
 
     bot.cmd(HOST, ["shot diverged_host"])
     bot.cmd(CLIENT, ["shot diverged_client"])
@@ -219,6 +224,16 @@ def routes(expect):
     expect(parse(client_state, "hero") == "9S", f"the client's game has 9S as the hero ({parse(client_state, 'hero')})")
     expect("different routes" in log_text(HOST) and "different routes" in log_text(CLIENT),
            "both logs say the routes differ")
+    # TASKS 3.1.1 / 3.1.2: no takeover on different routes, the message in the menu and on screen.
+    host_coop = bot.cmd(HOST, ["coop"], quiet=True)[-1]
+    client_coop = bot.cmd(CLIENT, ["coop"], quiet=True)[-1]
+    expect(parse(host_coop, "mismatch") == "routes" and parse(client_coop, "mismatch") == "routes",
+           f"both say: different story lines, different routes ({parse(host_coop, 'mismatch')} / {parse(client_coop, 'mismatch')})")
+    expect(parse(host_coop, "handle") == "0" and parse(client_coop, "handle") == "0",
+           f"nobody takes over a buddy (handles {parse(host_coop, 'handle')} / {parse(client_coop, 'handle')})")
+    expect("the story buddy is not taken over" in log_text(HOST) + log_text(CLIENT), "the log says why the buddy is not taken over")
+    bot.cmd(HOST, ["shot routes_host"])
+    bot.cmd(CLIENT, ["shot routes_client"])
 
 
 # The Commander on the "Test" save: west of her, facing east, the talk prompt shows (found 2026-10-18).
@@ -235,6 +250,27 @@ def commander(expect):
     if result is None:
         return
     talk_to_commander(expect, result[2], result[3])
+    host_puppet_where_host_is(expect)
+
+
+def host_puppet_where_host_is(expect):
+    """The Bunker's ring turns under the hero, in the client's game the host's puppet is the hero (sdk::BunkerRing).
+    Before 2026-10-21 the two games turned their rings differently: after the host's teleport to the Commander the
+    puppet ran around the Bunker in the client's game and ended up below the floor. Asserts that the client keeps its
+    ring at the host's angle and the puppet stands where the host is."""
+    host, client = bot.cmd(HOST, ["state"], quiet=True)[-1], bot.cmd(CLIENT, ["state"], quiet=True)[-1]
+    host_ring, client_ring = parse(host, "ring"), parse(client, "ring")
+    expect(host_ring not in (None, "none") and client_ring not in (None, "none")
+           and abs(float(host_ring) - float(client_ring)) < 0.5,
+           f"the client's Bunker ring is at the host's angle ({host_ring} / {client_ring} deg)")
+    puppet = [l for l in bot.cmd(CLIENT, ["entities 3000", "wait 100"], quiet=True) if l.startswith("entity Player model=10000 ")]
+    seen, actual = position(puppet[0].split(" pos=")[1].split()[0]) if puppet else None, position(parse(host, "player"))
+    distance = sum((a - b) ** 2 for a, b in zip(seen, actual)) ** 0.5 if seen and actual else None
+    expect(distance is not None and distance < 2.0,
+           f"the host's puppet in the client's game stands where the host is (distance {distance if distance is None else round(distance, 2)} m)")
+    # A look: the client next to the Commander too, east of her, facing west.
+    bot.goto_entity(CLIENT, COMMANDER_MODEL, 1.5, 0, 1.5, 270)
+    bot.cmd(CLIENT, ["wait 1500", "shot commander_client_sees_host"], quiet=True)
 
 
 def talk_to_commander(expect, host_state, client_state):

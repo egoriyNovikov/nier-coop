@@ -19,6 +19,7 @@
 #include "PhaseRequestGate.hpp"
 #include "StoryActionSync.hpp"
 #include "StoryWatcher.hpp"
+#include "BunkerRingHold.hpp"
 #include "NierClient.hpp"
 
 using namespace std;
@@ -389,6 +390,7 @@ void NierClient::think() {
     ScopeExit __{[this] { m_in_game_thread = false; }};
 
     m_in_world = true;
+    update_bunker_ring();
 
     pump();
 
@@ -404,6 +406,9 @@ void NierClient::think() {
         const auto follow = is_connected() && m_welcome_received && !m_is_master_client && share_story_actions && host != nullptr;
         PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{});
     }
+
+    // Also when the session is gone: then the ring turns on its own again.
+    follow_host_bunker_ring();
 
     if (!is_connected()) {
         return;
@@ -422,6 +427,7 @@ void NierClient::think() {
     send_log_copy();
     send_story_state();
     send_story_actions(story_actions);
+    send_bunker_ring();
 
     if (!m_story_catch_up.empty()) {
         const auto done = StoryActionSync::get().snapshot();
@@ -526,9 +532,9 @@ void NierClient::on_draw_ui() {
 
                 if (controlled != nullptr && controlled->behavior != nullptr) {
                     if (controlled->behavior->is_pl0000()) {
-                        controlled->behavior->as<sdk::Pl0000>()->setPosRotResetHap(Vector4f{*(Vector3f*)&it.second->get_player_data().position(), 1.0f}, glm::identity<glm::quat>());
+                        controlled->behavior->as<sdk::Pl0000>()->setPosRotResetHap(Vector4f{remote_position(*it.second), 1.0f}, glm::identity<glm::quat>());
                     } else {
-                        controlled->behavior->position() = *(Vector3f*)&it.second->get_player_data().position();
+                        controlled->behavior->position() = remote_position(*it.second);
                     }
                 }
             }
@@ -758,6 +764,13 @@ void NierClient::on_player_packet_received(nier::PacketType packet_type, const n
     case nier::PacketType_ID_STORY_ACTION: {
         if (!handle_story_action(packet)) {
             spdlog::debug("Failed to handle story action");
+        }
+
+        break;
+    }
+    case nier::PacketType_ID_BUNKER_RING: {
+        if (!handle_bunker_ring(packet)) {
+            spdlog::debug("Failed to handle the Bunker ring");
         }
 
         break;
@@ -1182,8 +1195,9 @@ void NierClient::send_player_data() {
         return;
     }
 
+    const auto position = m_bunker_ring ? m_bunker_ring->to_ring(entity->position()) : entity->position();
     nier::PlayerData player_data(entity->flashlight(), entity->speed(), entity->facing(), entity->facing2(), entity->weapon_index(),
-        entity->pod_index(), entity->character_controller().held_flags, *(nier::Vector3f*)&entity->position());
+        entity->pod_index(), entity->character_controller().held_flags, *(nier::Vector3f*)&position);
 
     flatbuffers::FlatBufferBuilder builder{};
     const auto offs = builder.CreateStruct(player_data);
@@ -1568,6 +1582,25 @@ bool NierClient::bind_puppet(Player& player) {
 
     auto local = possessed->behavior->as<sdk::Pl0000>();
 
+    // TASKS 3.1.1: on different routes the other player plays somebody else's story (route A 2B and 9S, route B the
+    // other way round), taking over would pull the wrong character out of our scene. The route comes with the first
+    // story state, until then nothing is taken over.
+    if (!player.get_story().known) {
+        return false;
+    }
+
+    if (compare_stories(StoryWatcher::get().current(), player.get_story()) == StoryMismatch::routes) {
+        if (m_route_block_logged != player.get_name()) {
+            m_route_block_logged = player.get_name();
+            spdlog::warn("[Coop] {} is on route {}, we are on route {}: different story lines, the story buddy is not taken over",
+                player.get_name(), player.get_story().route, StoryWatcher::get().current().route);
+        }
+
+        return false;
+    }
+
+    m_route_block_logged.clear();
+
     // Preferred: the buddy the game already gave us (9S next to 2B and so on).
     if (use_story_buddy) {
         auto buddy = entity_list->get_by_handle(local->buddy_handle());
@@ -1587,9 +1620,7 @@ bool NierClient::bind_puppet(Player& player) {
             // Taking over teleports the buddy to the other player. If that player is far from where our
             // story placed the buddy, our games are at different points: leave the buddy to the story
             // until the other player gets close.
-            const auto remote_position = *(Vector3f*)&player.get_player_data().position();
-
-            if (glm::length(remote_position - buddy->behavior->position()) > 50.0f) {
+            if (glm::length(remote_position(player) - buddy->behavior->position()) > 50.0f) {
                 return false;
             }
 
@@ -1868,11 +1899,11 @@ bool NierClient::handle_player_data(const nier::PlayerPacket* packet) {
 
     // With smoothing, think() moves the puppet towards this position over the next frames. Snapping
     // here fought the puppet's own run animation: it ran ahead, got pulled back on every packet.
-    if (npc != nullptr && !smooth_puppet_position) {
-        npc->position() = *(Vector3f*)&player_data->position();
-    }
-
     player_networked->set_player_data(*player_data);
+
+    if (npc != nullptr && !smooth_puppet_position) {
+        npc->position() = remote_position(*player_networked);
+    }
 
     return true;
 }
@@ -2210,7 +2241,7 @@ void NierClient::smooth_puppet_positions() {
         // The puppet runs on its own from the network speed and facing (puppet_as_player), this only
         // removes the drift between that and the remote player. The target lags by the network latency,
         // so the puppet trails the remote player by that much instead of jumping back and forth.
-        const auto target = *(Vector3f*)&player->get_player_data().position();
+        const auto target = remote_position(*player);
         auto& position = npc->position();
         const auto error = target - position;
         const auto distance = glm::length(error);
@@ -2221,11 +2252,104 @@ void NierClient::smooth_puppet_positions() {
 
         // A NaN position never comes back by itself, the distance is NaN too.
         if (distance > snap_distance || !std::isfinite(distance)) {
+            // Writing the position alone does not move the character's physics: the puppet stayed where it was
+            // and ran around there for seconds, then ended up below the floor (smoke run 2026-10-21, the host
+            // teleported to the Commander). The game's own teleport resets both, as the bot's goto does.
+            npc->setPosRotResetHap(Vector4f{target, 1.0f}, glm::angleAxis(npc->facing(), glm::vec3{0.0f, 1.0f, 0.0f}));
             position = target;
             ++m_stat_position_snaps;
         } else if (distance > dead_zone) {
             position += error * blend;
         }
+    }
+}
+
+Vector3f NierClient::remote_position(Player& player) const {
+    const auto position = *(Vector3f*)&player.get_player_data().position();
+    return m_bunker_ring ? m_bunker_ring->to_world(position) : position;
+}
+
+void NierClient::update_bunker_ring() {
+    // Outside the Bunker the entity list is walked for the ring twice a second, not every frame.
+    if (m_bunker_handle == 0 && m_bunker_search_frames++ % 30 != 0) {
+        return;
+    }
+
+    const auto had_ring = m_bunker_ring.has_value();
+    m_bunker_ring = sdk::BunkerRing::find(m_bunker_handle);
+
+    if (m_bunker_ring.has_value() != had_ring) {
+        if (m_bunker_ring) {
+            spdlog::info("[Coop] In the Bunker: positions go over the network in the ring's frame (ring at {:.1f} deg)",
+                glm::degrees(m_bunker_ring->angle()));
+        } else {
+            spdlog::info("[Coop] Out of the Bunker: positions go over the network as they are");
+        }
+    }
+}
+
+void NierClient::send_bunker_ring() {
+    if (!m_is_master_client || !m_bunker_ring) {
+        return;
+    }
+
+    // While the ring turns every frame, and once a second while it stands, so a client that comes in later gets it.
+    const auto now = std::chrono::steady_clock::now();
+    const auto angle = m_bunker_ring->angle();
+
+    if (std::abs(angle - m_sent_ring_angle) < 0.0005f && now - m_sent_ring_time < std::chrono::seconds{1}) {
+        return;
+    }
+
+    m_sent_ring_angle = angle;
+    m_sent_ring_time = now;
+
+    nier::BunkerRing data{angle};
+    flatbuffers::FlatBufferBuilder builder{};
+    builder.Finish(builder.CreateStruct(data));
+    send_packet(nier::PacketType_ID_BUNKER_RING, builder.GetBufferPointer(), builder.GetSize());
+}
+
+bool NierClient::handle_bunker_ring(const nier::PlayerPacket* packet) {
+    if (packet->guid() == m_guid || m_is_master_client || packet->data() == nullptr || packet->data()->size() < sizeof(uint32_t) + sizeof(nier::BunkerRing)) {
+        return false;
+    }
+
+    const auto angle = flatbuffers::GetRoot<nier::BunkerRing>(packet->data()->data())->angle();
+
+    if (!std::isfinite(angle)) {
+        return false;
+    }
+
+    m_host_ring_angle = angle;
+    m_host_ring_time = std::chrono::steady_clock::now();
+    return true;
+}
+
+void NierClient::follow_host_bunker_ring() {
+    // In our game the host's puppet is the hero and turns our ring its own way: it ran around the Bunker and ended
+    // up below the floor (smoke runs 2026-10-21). With the host's angle both games are the same Bunker.
+    std::scoped_lock _{m_players_mutex};
+    const auto host = get_host_player();
+    const auto follow = is_connected() && m_welcome_received && !m_is_master_client && m_bunker_ring && m_host_ring_angle &&
+        std::chrono::steady_clock::now() - m_host_ring_time < std::chrono::seconds{3} &&
+        host != nullptr && host->get_story().phase == StoryWatcher::get().current().phase;
+
+    if (follow != m_following_host_ring) {
+        m_following_host_ring = follow;
+
+        if (follow) {
+            spdlog::info("[Coop] Turning our Bunker ring with the host's (ours {:.1f} deg, the host's {:.1f} deg)",
+                glm::degrees(m_bunker_ring->angle()), glm::degrees(*m_host_ring_angle));
+        } else {
+            spdlog::info("[Coop] Our Bunker ring turns on its own again");
+        }
+    }
+
+    BunkerRingHold::get().set_hold(follow);
+
+    if (follow && sdk::BunkerRing::set_angle(m_bunker_handle, *m_host_ring_angle)) {
+        m_bunker_ring = sdk::BunkerRing::find(m_bunker_handle);
     }
 }
 
