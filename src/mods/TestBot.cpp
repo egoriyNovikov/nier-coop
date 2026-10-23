@@ -1073,6 +1073,9 @@ void TestBot::list_entities(float radius) {
         // Euler angles of the object (+0x90; +0x94 is Model::facing), e.g. a Flight Unit's pitch, yaw and bank.
         const auto rot = (const float*)((uintptr_t)entity->behavior + 0x90);
         line << " rot=" << rot[0] << "," << rot[1] << "," << rot[2];
+        // Orientation quaternion (+0x60, see sdk::BunkerRing): a Flight Unit leaves the euler angles at 0.
+        const auto quat = (const float*)((uintptr_t)entity->behavior + 0x60);
+        line << " quat=" << quat[0] << "," << quat[1] << "," << quat[2] << "," << quat[3];
         found.emplace_back(distance, line.str());
     }
 
