@@ -1076,6 +1076,9 @@ void TestBot::list_entities(float radius) {
         // Orientation quaternion (+0x60, see sdk::BunkerRing): a Flight Unit leaves the euler angles at 0.
         const auto quat = (const float*)((uintptr_t)entity->behavior + 0x60);
         line << " quat=" << quat[0] << "," << quat[1] << "," << quat[2] << "," << quat[3];
+        // The entity layout that placed it (sdk::LAYOUT_ID_OFFSET) and the behavior's address, for research.
+        line << " layout=" << std::hex << *(const uint32_t*)((uintptr_t)entity->behavior + sdk::LAYOUT_ID_OFFSET) << " beh="
+             << (uintptr_t)entity->behavior << std::dec;
         found.emplace_back(distance, line.str());
     }
 

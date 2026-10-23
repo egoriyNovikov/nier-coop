@@ -10,8 +10,8 @@
 // Story talks are the host's (TASKS 3.2.3, co-op concept 5.8: quest NPCs, choices in dialogs, quest starts - only the
 // host; owner's choice 2026-10-22: block the quest and story ones, merchants and plain chatter stay with each player).
 // In the client's game pressing the talk button next to an NPC that an objective of the story or of a side quest points
-// at does nothing but show a hint: the conversation is the host's, its result comes over with the host's story actions
-// (StoryActionSync). The game's "on talk" of the target (sdk::get_talk_function) is skipped for it.
+// at, or a side quest's giver (placed by a graph named after the quest, e.g. 依頼者_q210), does nothing but show a hint:
+// the conversation is the host's, its result comes over with the host's story actions (StoryActionSync). The game's "on talk" of the target (sdk::get_talk_function) is skipped for it.
 class StoryTalkGate {
 public:
     static StoryTalkGate& get();

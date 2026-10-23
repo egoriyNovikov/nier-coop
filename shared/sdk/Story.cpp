@@ -242,6 +242,26 @@ void* get_talk_function() {
     return function;
 }
 
+void* find_layout_entry(uint32_t layout_id) {
+    using Find = void* (*)(uint32_t);
+    static Find find = []() -> Find {
+        // push rsi; push rdi; push r12; push r14; push r15; sub rsp, 40h; mov [rsp+20h], -2; mov [rsp+70h], rbx;
+        // mov [rsp+80h], rbp; mov edi, ecx; mov r10, [table]
+        const auto code = utility::scan(utility::get_executable(),
+            "40 56 57 41 54 41 56 41 57 48 83 ec 40 48 c7 44 24 20 fe ff ff ff 48 89 5c 24 70 48 89 ac 24 80 00 00 00 8b f9 4c 8b 15");
+
+        if (!code) {
+            spdlog::error("[Story] Failed to find the layout lookup function");
+            return nullptr;
+        }
+
+        spdlog::info("[Story] Layout lookup function: {:x}", *code);
+        return (Find)*code;
+    }();
+
+    return find != nullptr && layout_id >= 0x80 ? find(layout_id) : nullptr;
+}
+
 char get_route(void* system) {
     for (const auto route : {'A', 'B', 'C'}) {
         if (has_scene_state(system, std::string{"Route/"} + route)) {

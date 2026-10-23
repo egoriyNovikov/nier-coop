@@ -59,6 +59,10 @@ public:
     // (sdk::LAYOUT_ID_OFFSET), the name of its graph; empty otherwise. TASKS 3.2.3: talking to it is the host's.
     std::string find_objective_graph(uint32_t layout_id);
 
+    // Game thread. Name of the graph whose action placed the object of that layout (an EntityLayoutArea of a quest
+    // giver graph like 依頼者_q210, オブジェ配置 for most NPCs), empty if not known. side_quest: the name has a quest id.
+    std::string find_placing_graph(uint32_t layout_id, bool& side_quest);
+
 private:
     using Clock = std::chrono::steady_clock;
 

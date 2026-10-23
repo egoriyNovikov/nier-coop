@@ -60,19 +60,25 @@ void StoryTalkGate::on_talk(void* target) {
     const auto name = type != nullptr ? type->name() : "?";
 
     if (!self.m_follow) {
-        spdlog::info("[Talk] Talking to {} (layout {:08x})", name, layout);
+        bool side_quest{};
+        spdlog::info("[Talk] Talking to {} (layout {:08x}, placed by \"{}\")", name, layout,
+            StoryActionSync::get().find_placing_graph(layout, side_quest));
         return original(target);
     }
 
-    const auto graph = StoryActionSync::get().find_objective_graph(layout);
+    auto& sync = StoryActionSync::get();
+    const auto objective = sync.find_objective_graph(layout);
+    bool side_quest{};
+    const auto placed_by = sync.find_placing_graph(layout, side_quest);
 
-    if (graph.empty()) {
-        spdlog::info("[Talk] Client talks to {} (layout {:08x}): no objective points at it, a talk of our own", name, layout);
+    if (objective.empty() && !side_quest) {
+        spdlog::info("[Talk] Client talks to {} (layout {:08x}, placed by \"{}\"): no objective points at it, a talk of our own", name, layout,
+            placed_by);
         return original(target);
     }
 
     ++self.m_blocked;
     self.m_hint_until_ms = now_ms() + std::chrono::duration_cast<std::chrono::milliseconds>(HINT_TIME).count();
-    spdlog::info("[Talk] Client tried to talk to {} (layout {:08x}), the objective of graph \"{}\": blocked, story talks are the host's",
-        name, layout, graph);
+    spdlog::info("[Talk] Client tried to talk to {} (layout {:08x}), {} \"{}\": blocked, story talks are the host's", name, layout,
+        objective.empty() ? "the giver placed by side quest graph" : "the objective of graph", objective.empty() ? placed_by : objective);
 }

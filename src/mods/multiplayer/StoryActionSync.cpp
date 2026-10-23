@@ -351,6 +351,39 @@ std::string StoryActionSync::find_objective_graph(uint32_t layout_id) {
     return {};
 }
 
+std::string StoryActionSync::find_placing_graph(uint32_t layout_id, bool& side_quest) {
+    side_quest = false;
+    const auto entry = sdk::find_layout_entry(layout_id);
+
+    if (entry == nullptr || !readable((uint8_t*)entry + sdk::LAYOUT_ENTRY_MIXIN_OFFSET, sizeof(void*))) {
+        return {};
+    }
+
+    const auto mixin = *(uintptr_t*)((uintptr_t)entry + sdk::LAYOUT_ENTRY_MIXIN_OFFSET);
+    std::scoped_lock _{m_mutex};
+
+    for (const auto& [hash, _graph] : m_graphs) {
+        const auto graph = get_graph(hash);
+
+        if (graph == nullptr) {
+            continue;
+        }
+
+        for (uint64_t i = 0; i < graph->count; ++i) {
+            if ((uintptr_t)graph->actions[i] + sdk::ACTION_LAYOUTS_MIXIN_OFFSET != mixin) {
+                continue;
+            }
+
+            const auto name = sdk::get_graph_name(graph);
+            const auto why = why_not_shared(name);
+            side_quest = why != nullptr && std::strcmp(why, "side quest") == 0;
+            return name.empty() ? fmt::format("{:08x}", hash) : name;
+        }
+    }
+
+    return {};
+}
+
 void StoryActionSync::on_remote_finished(const Finished& finished) {
     std::scoped_lock _{m_mutex};
     m_pending.push_back({finished, Clock::now()});

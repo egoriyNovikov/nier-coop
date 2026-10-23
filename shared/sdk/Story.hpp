@@ -55,6 +55,13 @@ constexpr size_t LAYOUT_ID_OFFSET = 0x66c;
 // 0xffffffff if the objective is a place. On 7020666 "Reboot: Speak with the Commander" (action 883b60bd of
 // M1010_S0030_GM) holds 0x6aae9bcb.
 constexpr size_t GOAL_TARGET_OFFSET = 0xc0;
+// The entity layout entry of a layout id (+0x3d8240 on 7020666, searches two sorted tables { id, entry }), nullptr if
+// none or not found. Its [+0x38] points to the hap::EntityLayoutsMixin of the action that placed the object, the mixin
+// sits at [action+0x50] (checked 2026-10-23 for the 23 NPCs of the Resistance Camp, all placed by オブジェ配置 graphs;
+// the giver graph of side quest q210 holds an EntityLayoutArea). Game thread.
+void* find_layout_entry(uint32_t layout_id);
+constexpr size_t LAYOUT_ENTRY_MIXIN_OFFSET = 0x38;
+constexpr size_t ACTION_LAYOUTS_MIXIN_OFFSET = 0x50;
 
 // Layout of the phase's script graph, found 2026-10-19 on 7020666. A graph belongs to a script node named after
 // the quest step (e.g. "M1010_S0030_GM" in 16_AB_bunker_Order) and holds its actions:
