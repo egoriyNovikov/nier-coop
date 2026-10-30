@@ -64,7 +64,7 @@ def main():
     # Game logs carry graph names in Shift-JIS; the console may not show every character.
     sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host", "leave", "leave_lost", "leave_host"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host", "leave", "leave_lost", "leave_host", "background_keys"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
                              "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
@@ -73,7 +73,8 @@ def main():
                              "death: the client dies, the host's character dies too, both continue (Bunker); "
                              "death_world: the same in the open world, with the Body Report; death_host: the host dies first; "
                              "leave: the client presses Disconnect, the host's 9S goes back to the AI and follows 2B; "
-                             "leave_lost: the client's game is killed (lost connection); leave_host: the host leaves")
+                             "leave_lost: the client's game is killed (lost connection); leave_host: the host leaves; "
+                             "background_keys: keys pressed in one game's window don't reach the other (background) one")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -91,7 +92,7 @@ def main():
         {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar,
          "client_talk": client_talk, "death": death,
          "death_world": lambda e: death(e, 0), "death_host": lambda e: death(e, 1, HOST),
-         "leave": leave, "leave_lost": lambda e: leave(e, lost=True), "leave_host": lambda e: leave(e, HOST)}[args.scenario](expect)
+         "leave": leave, "leave_lost": lambda e: leave(e, lost=True), "leave_host": lambda e: leave(e, HOST), "background_keys": background_keys}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -595,6 +596,95 @@ def leave(expect, who=CLIENT, lost=False):
     bot.cmd(stays, [f"shot leave_{stays}"], quiet=True)
     expect(walked > 5, "the hero walked away (stick)")
     expect(moved is not None and moved > 0.6 * walked and gap is not None and gap < 12, "the buddy followed the hero (AI)")
+
+
+def game_window(slot):
+    """The top-level window of the slot's game."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    pid = int(subprocess.run(["powershell", "-NoProfile", "-Command",
+                              f"(Get-Process NieRAutomata | Where-Object Path -eq '{bot.slot_dir(slot) / 'NieRAutomata.exe'}').Id"],
+                             capture_output=True, text=True).stdout.split()[0])
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(each, 0)
+    return found[0] if found else None
+
+
+def press_in_front(hwnd, scan_code, ms):
+    """Brings the window to the front, holds a key (scan code, as DirectInput reads it), then gives the front back."""
+    import ctypes
+    user32 = ctypes.windll.user32
+    previous = user32.GetForegroundWindow()
+    # Windows lets a background process take the front only right after a key event of its own.
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(0x12, 0, 2, 0)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.5)
+    in_front = user32.GetForegroundWindow() == hwnd
+    if in_front and scan_code:
+        user32.keybd_event(0, scan_code, 0x8, 0)  # KEYEVENTF_SCANCODE
+        time.sleep(ms / 1000)
+        user32.keybd_event(0, scan_code, 0x8 | 0x2, 0)
+    time.sleep(0.3)
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(0x12, 0, 2, 0)
+    user32.SetForegroundWindow(previous)
+    return in_front
+
+
+def background_keys(expect):
+    """Owner's report 2026-10-30: with two test copies on one PC, keys pressed in the owner's window moved the
+    character in the bot's window too (the mod hides the loss of focus from the game so that it doesn't pause).
+    Both load the finished save (no session needed); W is held in slot2's window: only slot2's hero walks. Then the
+    bot's virtual pad still moves slot1's hero in the background."""
+    for slot in (HOST, CLIENT):
+        expect(bot.start(slot) and bot.load(slot, 0), f"{slot} loaded save 0")
+    window = game_window(CLIENT)
+    expect(window is not None, "found slot2's window")
+    if window is None:
+        return
+
+    def hold_w(key=0x11):
+        bot.cmd(HOST, ["wait 2000"], quiet=True)  # both stand still first
+        before = {slot: position(parse(bot.cmd(slot, ["state"], quiet=True)[-1], "player")) for slot in (HOST, CLIENT)}
+        expect(press_in_front(window, key, 2000), "slot2's window came to the front, W held 2 s" if key else "slot2's window in front, no key")
+        after = {slot: position(parse(bot.cmd(slot, ["wait 500", "state"], quiet=True)[-1], "player")) for slot in (HOST, CLIENT)}
+        return {slot: sum((a - b) ** 2 for a, b in zip(after[slot], before[slot])) ** 0.5 for slot in (HOST, CLIENT)}
+
+    # A game that comes to the front for the first time takes a moment before it reads the keyboard (first run
+    # 2026-10-30: W in front moved nothing there). Also: how far the background hero drifts without any key.
+    moved = hold_w(0)
+    print(f"  observed: no key: slot1 {moved[HOST]:.2f} m, slot2 {moved[CLIENT]:.2f} m")
+    # Control: without InputFocus the background game hears the key too (the owner's report).
+    for slot in (HOST, CLIENT):
+        bot.cmd(slot, ["option input_focus 0"], quiet=True)
+    moved = hold_w()
+    print(f"  observed: without InputFocus, walked with W: slot1 {moved[HOST]:.2f} m (background), slot2 {moved[CLIENT]:.2f} m (in front)")
+    expect(moved[CLIENT] > 2, "control: the window in front got the key")
+    expect(moved[HOST] > 2, "control: without InputFocus the window in the background got it too (the owner's report)")
+    for slot in (HOST, CLIENT):
+        bot.cmd(slot, ["option input_focus 1"], quiet=True)
+    moved = hold_w()
+    print(f"  observed: walked with W: slot1 {moved[HOST]:.2f} m (background), slot2 {moved[CLIENT]:.2f} m (in front)")
+    expect(moved[CLIENT] > 2, "the window in front got the key")
+    expect(moved[HOST] < 0.3, "the window in the background didn't")
+    start = position(parse(bot.cmd(HOST, ["state"], quiet=True)[-1], "player"))
+    end = position(parse(bot.cmd(HOST, ["stick 0 1 2000", "stick 0 0 100", "wait 500", "state"], quiet=True)[-1], "player"))
+    walked = sum((a - b) ** 2 for a, b in zip(end, start)) ** 0.5
+    print(f"  observed: slot1 walked {walked:.2f} m with the bot's pad")
+    expect(walked > 2, "the bot's virtual pad still drives the window in the background")
+    log = log_text(HOST)
+    expect("[Input] Input of the player is ignored" in log and "[Input] Failed" not in log, "InputFocus hooked everything")
 
 
 DEATH_STATES = {"0x33", "0x34", "0x35", "0x36"}

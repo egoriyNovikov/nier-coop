@@ -23,6 +23,7 @@
 #include "../AutomataMP.hpp"
 #include "../TestMode.hpp"
 #include "AutomataMPMod.hpp"
+#include "InputFocus.hpp"
 #include "multiplayer/PhaseRequestGate.hpp"
 #include "multiplayer/StoryActionSync.hpp"
 #include "multiplayer/StoryTalkGate.hpp"
@@ -128,7 +129,14 @@ DWORD WINAPI TestBot::xinput_get_state(DWORD user_index, XINPUT_STATE* state) {
     const auto original = g_bot->m_xinput_hook->get_original<decltype(xinput_get_state)>();
 
     if (user_index != 0 || state == nullptr) {
-        return original(user_index, state);
+        // A real pad: nothing pressed while another window is in front (InputFocus).
+        const auto result = original(user_index, state);
+
+        if (result == ERROR_SUCCESS && state != nullptr && !InputFocus::has_focus()) {
+            state->Gamepad = {};
+        }
+
+        return result;
     }
 
     const auto buttons = g_buttons.load();

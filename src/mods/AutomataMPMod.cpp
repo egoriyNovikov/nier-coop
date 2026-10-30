@@ -17,6 +17,7 @@
 #include <sdk/Game.hpp>
 #include <sdk/ScriptFunctions.hpp>
 #include "AutomataMPMod.hpp"
+#include "InputFocus.hpp"
 #include "Version.hpp"
 #include "multiplayer/BunkerRingHold.hpp"
 #include "multiplayer/PhaseRequestGate.hpp"
@@ -639,6 +640,8 @@ bool AutomataMPMod::set_coop_option(std::string_view name, bool value) {
         NierClient::research_takeover = value;
     } else if (name == "swap") {
         NierClient::research_swap = value;
+    } else if (name == "input_focus") {
+        InputFocus::enabled = value;
     } else if (name == "flight_follow") {
         NierClient::follow_flight_units = value;
     } else if (name == "trace_scripts") {
