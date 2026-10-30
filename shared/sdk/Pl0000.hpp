@@ -59,6 +59,46 @@ public:
         return *(uint32_t*)((uintptr_t)this + 0x598);
     }
 
+    // State of the character's state machine; the Pl0000 update switches on it (base + 0x503968, 0xd4 states) and
+    // start_animation (vfunc +0x90) sets it, which is why it goes over the network as the "animation".
+    __forceinline uint32_t& state() {
+        return *(uint32_t*)((uintptr_t)this + 0x670);
+    }
+
+    // The ways to die (TASKS 1.4.1): 0x33, 0x34 and 0x35 end in 0x36 (base + 0x4aaf10), which builds the Body Report
+    // and, for a player controlled character (vfunc +0x350), asks for the next phase: the Game Over (base + 0x4ab622).
+    static constexpr uint32_t STATE_DIE_FIRST = 0x33;
+    static constexpr uint32_t STATE_DIE = 0x35;
+    static constexpr uint32_t STATE_DIE_LAST = 0x36;
+
+    static constexpr bool is_death_state(uint32_t state) {
+        return state >= STATE_DIE_FIRST && state <= STATE_DIE_LAST;
+    }
+
+    bool is_dying() {
+        return is_death_state(state());
+    }
+
+    // The real health. The game copies it into health() (+0x858, what getHp returns) every frame (base + 0x428b96),
+    // so only a write here sticks.
+    __forceinline int32_t& real_health() {
+        return *(int32_t*)((uintptr_t)this + 0x10668);
+    }
+
+    // Frames left without damage. setEventMuteki sets 300 (base + 0x4eca50), changePlayer 60 (base + 0x47626d); the
+    // damage handler of characters (base + 0x47a9c0) compares it before a hit counts.
+    __forceinline float& muteki_timer() {
+        return *(float*)((uintptr_t)this + 0x10364);
+    }
+
+    // Dies the way the game's own instant deaths do it (base + 0x47bf1a): health 0, then state 0x35, which goes on
+    // to the Body Report and the Game Over.
+    void kill() {
+        real_health() = 0;
+        health() = 0;
+        start_animation(STATE_DIE, 0, 0, 0);
+    }
+
     // Input sources of the controller, the game reads only the enabled ones (base + 0x52a690, 0x52ac90):
     // pad (+0x720, the physical gamepad), script (+0x724, data at +0x1c0), AI (+0x728, data at +0x3e8).
     __forceinline uint32_t* controller_input_sources() {

@@ -10,6 +10,8 @@
 
 #include <sdk/CameraGame.hpp>
 #include <sdk/Enums.hpp>
+#include <sdk/Game.hpp>
+#include <sdk/Story.hpp>
 
 #include "AutomataMP.hpp"
 #include "Version.hpp"
@@ -406,6 +408,8 @@ void NierClient::think() {
         const auto host = get_host_player();
         const auto follow = is_connected() && m_welcome_received && !m_is_master_client && share_story_actions && host != nullptr;
         PhaseRequestGate::get().set_leader(follow, follow ? host->get_story().phase : std::string{}, follow ? host->get_story().phase_requests : 0);
+        // The client's Game Over waits for the host's while the death is shared (TASKS 1.4.4).
+        PhaseRequestGate::get().set_shared_death(follow && is_death_shared(*host));
         // Story talks are the host's too (TASKS 3.2.3).
         StoryTalkGate::get().set_follow(follow);
     }
@@ -477,6 +481,8 @@ void NierClient::think() {
     if (m_players.contains(m_guid)) {
         update_local_player_data();
         watch_local_character();
+        watch_own_death();
+        apply_partner_death();
         send_player_data();
         stop_stale_puppets();
 
@@ -508,6 +514,7 @@ void NierClient::think() {
             npc->pod_index() = data.pod_index();
             npc->character_controller().held_flags = data.held_button_flags();
             //*npc->getPosition() = *(Vector3f*)&data.position();
+            keep_puppet_alive(npc);
         }
 
         smooth_puppet_positions();
@@ -774,6 +781,13 @@ void NierClient::on_player_packet_received(nier::PacketType packet_type, const n
     case nier::PacketType_ID_BUNKER_RING: {
         if (!handle_bunker_ring(packet)) {
             spdlog::debug("Failed to handle the Bunker ring");
+        }
+
+        break;
+    }
+    case nier::PacketType_ID_PLAYER_DIED: {
+        if (!handle_player_died(packet)) {
+            spdlog::debug("Failed to handle the other player's death");
         }
 
         break;
@@ -1953,6 +1967,14 @@ bool NierClient::handle_animation_start(const nier::PlayerPacket* packet) {
 
     ++m_stat_anims_received;
 
+    // The death states (TASKS 1.4.2): the puppet would die here and, being player controlled, call the Game Over of our
+    // game (test 2026-10-23). Its player's death comes as ID_PLAYER_DIED instead.
+    if (sdk::Pl0000::is_death_state(animation_data->anim())) {
+        spdlog::info("[Death] {}'s character goes into death state 0x{:x} in their game, their puppet here doesn't",
+            player_networked->get_name(), animation_data->anim());
+        return true;
+    }
+
     if (npc != nullptr) {
         switch (animation_data->anim()) {
         case sdk::EAnimation::INVALID_CRASHES_GAME:
@@ -2437,6 +2459,153 @@ void NierClient::follow_host_bunker_ring() {
 
     if (follow && sdk::BunkerRing::set_angle(m_bunker_handle, *m_host_ring_angle)) {
         m_bunker_ring = sdk::BunkerRing::find(m_bunker_handle);
+    }
+}
+
+bool NierClient::is_death_shared(const Player& other) const {
+    // Co-op concept 6 point 5 and 5.3: shared in routes A and B and at the start of route C, while 2B and 9S are
+    // together; once one of us plays A2 (route C after the heroes part) each dies alone. Unknown story: shared.
+    return StoryWatcher::get().current().character != "A2" && other.get_story().character != "A2";
+}
+
+void NierClient::watch_own_death() {
+    const auto entity_list = sdk::EntityList::get();
+    const auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (possessed == nullptr || possessed->behavior == nullptr || !possessed->behavior->is_pl0000()) {
+        return;
+    }
+
+    const auto hero = possessed->behavior->as<sdk::Pl0000>();
+
+    if (!hero->is_dying()) {
+        m_own_death_seen = false;
+        m_dying_for_partner = false;
+        return;
+    }
+
+    if (m_own_death_seen) {
+        return;
+    }
+
+    m_own_death_seen = true;
+
+    if (m_dying_for_partner) {
+        spdlog::info("[Death] Our character dies (state 0x{:x}) because the other player died", hero->state());
+        return;
+    }
+
+    std::scoped_lock _{m_players_mutex};
+    const Player* other{nullptr};
+
+    for (const auto& [guid, player] : m_players) {
+        if (guid != m_guid && player != nullptr) {
+            other = player.get();
+        }
+    }
+
+    if (other == nullptr) {
+        spdlog::info("[Death] Our character died in {} (state 0x{:x}), nobody else is in the session", sdk::get_phase_name(), hero->state());
+        return;
+    }
+
+    if (is_death_shared(*other)) {
+        spdlog::info("[Death] Our character died in {} (state 0x{:x}): {} dies too (shared death)", sdk::get_phase_name(), hero->state(),
+            other->get_name());
+    } else {
+        spdlog::info("[Death] Our character died in {} (state 0x{:x}): {} plays on (each dies alone, one of us plays A2)",
+            sdk::get_phase_name(), hero->state(), other->get_name());
+    }
+
+    // Sent either way: the other game decides by the same rule, and the server log shows the death.
+    nier::PlayerDied data{hero->state()};
+    flatbuffers::FlatBufferBuilder builder{};
+    builder.Finish(builder.CreateStruct(data));
+    send_packet(nier::PacketType_ID_PLAYER_DIED, builder.GetBufferPointer(), builder.GetSize());
+}
+
+bool NierClient::handle_player_died(const nier::PlayerPacket* packet) {
+    if (packet->guid() == m_guid || packet->data() == nullptr || packet->data()->size() < sizeof(uint32_t) + sizeof(nier::PlayerDied)) {
+        return false;
+    }
+
+    const auto state = flatbuffers::GetRoot<nier::PlayerDied>(packet->data()->data())->state();
+
+    std::scoped_lock _{m_players_mutex};
+    const auto it = m_players.find(packet->guid());
+
+    if (it == m_players.end() || it->second == nullptr) {
+        return false;
+    }
+
+    spdlog::info("[Death] {} died in their game (state 0x{:x})", it->second->get_name(), state);
+    m_partner_death = PartnerDeath{packet->guid(), state, std::chrono::steady_clock::now()};
+    return true;
+}
+
+void NierClient::apply_partner_death() {
+    std::scoped_lock _{m_players_mutex};
+
+    if (!m_partner_death) {
+        return;
+    }
+
+    const auto death = *m_partner_death;
+    const auto it = m_players.find(death.guid);
+
+    if (it == m_players.end() || it->second == nullptr) {
+        spdlog::info("[Death] The player who died left the session, our character lives on");
+        m_partner_death.reset();
+        return;
+    }
+
+    const auto& other = *it->second;
+
+    if (!is_death_shared(other)) {
+        spdlog::info("[Death] {} died, we play on: each dies alone while one of us plays A2", other.get_name());
+        m_partner_death.reset();
+        return;
+    }
+
+    // Not in a loading or a cutscene: wait for the game to be playable, but not for long.
+    if (std::chrono::steady_clock::now() - death.at > std::chrono::seconds{30}) {
+        spdlog::warn("[Death] {} died 30 s ago and our character couldn't die since (loading or a cutscene), we play on", other.get_name());
+        m_partner_death.reset();
+        return;
+    }
+
+    if (sdk::is_loading() || StoryWatcher::get().current().event != 0) {
+        return;
+    }
+
+    const auto entity_list = sdk::EntityList::get();
+    const auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    if (possessed == nullptr || possessed->behavior == nullptr || !possessed->behavior->is_pl0000()) {
+        return;
+    }
+
+    const auto hero = possessed->behavior->as<sdk::Pl0000>();
+    m_partner_death.reset();
+
+    if (hero->is_dying()) {
+        spdlog::info("[Death] {} died, our character is dying already (state 0x{:x})", other.get_name(), hero->state());
+        return;
+    }
+
+    spdlog::info("[Death] {} died: our character dies too (shared death)", other.get_name());
+    m_dying_for_partner = true;
+    hero->kill();
+}
+
+void NierClient::keep_puppet_alive(sdk::Pl0000* npc) {
+    // Enemies of our game hit the puppet, but its player never got these hits. The game's own invulnerability timer is
+    // kept up (setEventMuteki gives 300 frames), and the health stays full in case a hit gets through anyway.
+    npc->muteki_timer() = std::max(npc->muteki_timer(), 300.0f);
+
+    if (const auto max = npc->getHpMax(); max > 0 && npc->real_health() < max) {
+        npc->real_health() = max;
+        npc->health() = (uint32_t)max;
     }
 }
 

@@ -193,6 +193,7 @@ private:
     bool handle_story_state(const nier::PlayerPacket* packet);
     bool handle_story_action(const nier::PlayerPacket* packet);
     bool handle_bunker_ring(const nier::PlayerPacket* packet);
+    bool handle_player_died(const nier::PlayerPacket* packet);
 
     void send_enemy_died(const EnemyDeathSync::Death& death);
     void send_story_state();
@@ -233,6 +234,20 @@ private:
     void send_bunker_ring();
     void follow_host_bunker_ring();
     void log_animation_stats();
+
+    // Death in co-op (TASKS 1.4.2, 1.4.4; co-op concept 6 point 5 and 5.3, decision 2026-10-23). Each character dies
+    // only in its own game: the puppet of the other player can't be hurt here and doesn't play its player's death
+    // (the death states go over the network as animations). A death goes over as ID_PLAYER_DIED; while the death is
+    // shared (routes A and B, route C until the heroes part) the other game kills its own character, and the client's
+    // Game Over waits for the host's (PhaseRequestGate). Game thread only.
+    // Whether a death of one of us is the death of both: not when one of us plays A2 (route C after the split).
+    bool is_death_shared(const Player& other) const;
+    // Sends the death of our character once, when it enters a death state.
+    void watch_own_death();
+    // Kills our character after the other player's death, when the game can take it (not loading, no cutscene).
+    void apply_partner_death();
+    // The puppet takes no damage in our game: its player's health and death are in the other game.
+    void keep_puppet_alive(sdk::Pl0000* npc);
 
     std::unique_ptr<EntitySync> m_network_entities{};
 
@@ -303,6 +318,16 @@ private:
     uint32_t m_stat_position_samples{0};
     uint32_t m_stat_position_snaps{0};
     uint32_t m_stat_bad_player_data{0};
+
+    // Death in co-op (watch_own_death, apply_partner_death).
+    bool m_own_death_seen{false};      // our character is in a death state, its death was handled
+    bool m_dying_for_partner{false};   // and it dies because the other player died: not sent back
+    struct PartnerDeath {
+        uint64_t guid{};
+        uint32_t state{};
+        std::chrono::steady_clock::time_point at{};
+    };
+    std::optional<PartnerDeath> m_partner_death{}; // under m_players_mutex
 
     // watch_local_character: our character in the previous think.
     uint32_t m_watched_handle{0};

@@ -32,6 +32,7 @@ enum PacketType : uint {
     ID_STORY_STATE, // Where the sender's game is in the story (StoryState), on change and every few seconds.
     ID_STORY_ACTION, // An action of the story script finished in the host's game (StoryAction), the client finishes it too.
     ID_BUNKER_RING, // The angle of the Bunker's ring in the host's game (BunkerRing), the client turns its ring the same. Added in 3.4.
+    ID_PLAYER_DIED, // The sender's character died in its own game (PlayerDied); with shared death the other one dies too. Added in 3.5.
     ID_CLIENT_END,
 
     ID_PING = 32768,

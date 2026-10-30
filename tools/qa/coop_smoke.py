@@ -8,7 +8,10 @@
    routes: the host the "Test" save (route A), the client Chapter Select as 9S (route B);
    commander: both the "Test" save, then the host talks to the Commander, TASKS 3.0.1;
    hangar: as commander, then the host goes on to the hangar until the phase changes, TASKS 3.0.1 / 3.2.1;
-   client_talk: both the "Test" save, the client tries to talk to the Commander, then the host does, TASKS 3.2.3).
+   client_talk: both the "Test" save, the client tries to talk to the Commander, then the host does, TASKS 3.2.3;
+   death: both the "Test" save, the client dies, then the host dies too and both continue, TASKS 1.4.2 / 1.4.4;
+   death_world: the same in the open world (finished save), where the Game Over shows the Body Report;
+   death_host: as death, but the host dies first).
 3. slot1 presses "Host Game", slot2 "Join Game" to 127.0.0.1:6969.
 4. Asserts: both are in the session, slot1 leads the story and slot2 doesn't, each sees the other
    player's position close to where the other game says its player is, the phase and route are known
@@ -60,12 +63,14 @@ def main():
     # Game logs carry graph names in Shift-JIS; the console may not show every character.
     sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
                              "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
                              "hangar: then the host flies off from the hangar (natural phase change); "
-                             "client_talk: the client tries the host's story talk with the Commander")
+                             "client_talk: the client tries the host's story talk with the Commander; "
+                             "death: the client dies, the host's character dies too, both continue (Bunker); "
+                             "death_world: the same in the open world, with the Body Report; death_host: the host dies first")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -81,7 +86,8 @@ def main():
 
     try:
         {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar,
-         "client_talk": client_talk}[args.scenario](expect)
+         "client_talk": client_talk, "death": death,
+         "death_world": lambda e: death(e, 0), "death_host": lambda e: death(e, 1, HOST)}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -502,6 +508,83 @@ def fly_together(expect):
     state = bot.cmd(CLIENT, ["state"], quiet=True)[-1]
     expect(parse(state, "phase_held") == "0" or len(released) >= len(held) - 1,
            f"the client's game is not stuck with a held phase request (held {len(held)}, let through {len(released)})")
+
+
+
+DEATH_STATES = {"0x33", "0x34", "0x35", "0x36"}
+
+
+def death(expect, save=1, first=CLIENT):
+    """TASKS 1.4.2 / 1.4.4, co-op concept 6 point 5 (decision 2026-10-23): both load the "Test" save (Bunker, route A),
+    the client plays 9S, which is the host's puppet. The puppet can't be hurt in the host's game. The client dies
+    (bot `die`, the way the game kills): the host's character dies too, the host's puppet doesn't play the death, the
+    client's Game Over waits for the host's. Both are back in the world and in the session: in the Bunker the Game
+    Over loads at once, in the open world (save 0: finished save) each presses Continue on the Body Report.
+    first=HOST: the host dies, the client's character dies too and its Game Over follows the host's."""
+    other = HOST if first == CLIENT else CLIENT
+    result = connect(expect, save, save)
+    if result is None:
+        return
+    if save == 1:
+        lines = entities(HOST)
+        puppet = [l for l in lines if l.startswith("entity") and " model=10200 " in l]
+        print("  observed: 9S in the host's game: " + (puppet[0].split(" rot=")[0] + " " + " ".join(puppet[0].split()[-3:]) if puppet else "none"))
+        expect(bool(puppet) and float(parse(puppet[0], "muteki") or 0) >= 250, "the client's puppet in the host's game can't be hurt (muteki timer kept up)")
+
+    expect(bot.cmd(first, ["die"], quiet=True)[-1].startswith("ok"), f"{first}'s character dies (bot die)")
+    other_dying = False
+    for _ in range(15):
+        state = bot.cmd(other, ["wait 1000", "state"], quiet=True)[-1]
+        other_dying = other_dying or parse(state, "pl_state") in DEATH_STATES
+        if other_dying:
+            break
+    print(f"  observed: {other} state " + str(parse(state, "pl_state")))
+    expect(other_dying, f"{other}'s character dies too (shared death)")
+    expect("dies too (shared death)" in log_text(first), f"{first}'s mod sent its death as shared")
+    expect("their puppet here doesn't" in log_text(other), f"{first}'s puppet in {other}'s game doesn't play the death")
+
+    # Each dying ends in state 0x36, which asks for the Game Over; the client's request waits for the host's.
+    for _ in range(30):
+        if "Letting the held phase request" in log_text(CLIENT):
+            break
+        bot.cmd(HOST, ["wait 1000"], quiet=True)
+    for line in [l for l in log_text(CLIENT).splitlines() if "[Death]" in l or "Client died" in l or "Letting the held" in l][-5:]:
+        print("    client: " + line.split("] ", 2)[-1])
+    for line in [l for l in log_text(HOST).splitlines() if "[Death]" in l or "asks for the next phase" in l][-5:]:
+        print("    host: " + line.split("] ", 2)[-1])
+    expect("the Game Over waits for the host's" in log_text(CLIENT), "the client's Game Over waited for the host's")
+    expect(re.search(r"Letting the held phase request .* the host's Game Over loaded", log_text(CLIENT)) is not None,
+           "the client's Game Over went on after the host's")
+
+    # The Body Report (open world) waits for Continue, the second item; the Bunker loads at once.
+    back, reported = {}, set()
+    for _ in range(40):
+        for slot in (HOST, CLIENT):
+            state = bot.cmd(slot, ["state"], quiet=True)[-1]
+            if parse(state, "loading") == "0" and parse(state, "pl_state") not in DEATH_STATES | {None}:
+                back[slot] = state
+            elif parse(state, "loading") == "0" and parse(state, "pl_state") == "0x36" and slot not in reported:
+                # The menu comes a few seconds after the report text; presses before it are lost. The Bunker's
+                # Game Over is in 0x36 for a moment too, then loads: no report there.
+                state = bot.cmd(slot, ["wait 6000", "state"], quiet=True)[-1]
+                if parse(state, "loading") == "0" and parse(state, "pl_state") == "0x36":
+                    bot.cmd(slot, [f"shot body_report_{slot}", "pad DOWN 120", "pad A 120"], quiet=True)
+                    reported.add(slot)
+        if len(back) == 2:
+            break
+        bot.cmd(HOST, ["wait 2000"], quiet=True)
+    for slot in (HOST, CLIENT):
+        print(f"  observed: {slot} after the Game Over{' (Body Report, Continue)' if slot in reported else ''}: "
+              + (back.get(slot) or bot.cmd(slot, ["state"], quiet=True)[-1])[:200])
+        expect(slot in back, f"{slot} is back in the world after the Game Over")
+    if save == 0:
+        expect(reported == {HOST, CLIENT}, "both games showed the Body Report")
+    # TASKS 1.4.3: after the reload the client takes over 9S again.
+    expect(parse(back.get(CLIENT, ""), "model") == "10200", f"the client plays 9S again ({parse(back.get(CLIENT, ''), 'model')})")
+    host_coop = bot.cmd(HOST, ["wait 6000", "coop"], quiet=True)[-1]
+    client_coop = bot.cmd(CLIENT, ["coop"], quiet=True)[-1]
+    expect(parse(host_coop, "session") == "1" and parse(client_coop, "session") == "1", "both are still in the session")
+    expect(parse(host_coop, "other_story") == parse(back.get(CLIENT, ""), "phase"), f"the games are in the same phase again ({parse(host_coop, 'other_story')})")
 
 
 if __name__ == "__main__":

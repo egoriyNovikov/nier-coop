@@ -55,6 +55,12 @@ struct BunkerRing {
     angle: float; // radians
 }
 
+// The sender's character died in its own game (TASKS 1.4.4, co-op concept 6 point 5). Sent once per death, when the
+// character enters a death state; the receiver's character dies too while the death is shared. Added in 3.5.
+struct PlayerDied {
+    state: uint; // the death state the character entered (sdk::Pl0000::state(), 0x33-0x36)
+}
+
 table Buttons {
     buttons: [uint]; // 8 buttons
 }

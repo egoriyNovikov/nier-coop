@@ -3,12 +3,27 @@
 
 #include <spdlog/spdlog.h>
 
+#include <sdk/Entity.hpp>
+#include <sdk/EntityList.hpp>
 #include <sdk/Game.hpp>
+#include <sdk/Pl0000.hpp>
 #include <sdk/ScriptFunctions.hpp>
 #include <sdk/Story.hpp>
 
 #include "PhaseRequestGate.hpp"
 #include "ScriptTracer.hpp"
+
+namespace {
+// The death state of our character asks for the next phase (the Game Over, base + 0x4ab622): with that the request
+// is our death, whoever calls.
+bool own_character_dying() {
+    const auto entity_list = sdk::EntityList::get();
+    const auto possessed = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+    return possessed != nullptr && possessed->behavior != nullptr && possessed->behavior->is_pl0000() &&
+        possessed->behavior->as<sdk::Pl0000>()->is_dying();
+}
+}
 
 PhaseRequestGate& PhaseRequestGate::get() {
     static PhaseRequestGate gate{};
@@ -90,6 +105,7 @@ void PhaseRequestGate::on_request() {
     std::unique_lock lock{self.m_mutex};
 
     const auto story = caller == self.m_story_caller;
+    const auto death = !story && self.m_hold && self.m_shared_death && own_character_dying();
 
     if (!self.m_hold) {
         spdlog::info("[Phase] The game asks for the next phase in {} (caller +0x{:x}{})", phase, rva, story ? ", story" : "");
@@ -99,7 +115,7 @@ void PhaseRequestGate::on_request() {
         return;
     }
 
-    if (!story) {
+    if (!story && !death) {
         spdlog::info("[Phase] Client tried to change phase in {} (caller +0x{:x}, not the story's call): let through", phase, rva);
         ++self.m_passed;
         lock.unlock();
@@ -112,12 +128,19 @@ void PhaseRequestGate::on_request() {
     }
 
     self.m_held = true;
+    self.m_held_death = death;
     self.m_held_phase = phase;
     self.m_held_leader_phase = self.m_leader_phase;
     self.m_held_leader_requests = self.m_leader_requests;
     self.m_held_at = Clock::now();
-    spdlog::info("[Phase] Client tried to change phase in {} (caller +0x{:x}): held until the host's phase changes (host in {})", phase, rva,
-        self.m_leader_phase.empty() ? "?" : self.m_leader_phase);
+
+    if (death) {
+        spdlog::info("[Phase] Client died in {} (caller +0x{:x}): the Game Over waits for the host's (host in {})", phase, rva,
+            self.m_leader_phase.empty() ? "?" : self.m_leader_phase);
+    } else {
+        spdlog::info("[Phase] Client tried to change phase in {} (caller +0x{:x}): held until the host's phase changes (host in {})", phase, rva,
+            self.m_leader_phase.empty() ? "?" : self.m_leader_phase);
+    }
 }
 
 void PhaseRequestGate::update() {
@@ -137,6 +160,24 @@ void PhaseRequestGate::update() {
     if (!sdk::is_loading() && phase != m_held_phase) {
         spdlog::info("[Phase] Our phase changed to {} by itself, the held request from {} is dropped", phase, m_held_phase);
         m_held = false;
+        return;
+    }
+
+    // Our death waits for the host's Game Over, which loads a block. The host's character dies a few seconds before
+    // or after ours (the deaths go over the network, each dying takes 10-15 s), so a block loaded in the 30 s before
+    // our request counts too. If the host doesn't load at all (it was in a cutscene, its game didn't die), we go on.
+    if (m_held_death) {
+        const auto now = Clock::now();
+
+        if (m_leader_requests > m_held_leader_requests) {
+            release("the host's Game Over loaded");
+        } else if (m_leader_requests > 0 && m_held_at - m_leader_requests_changed_at < std::chrono::seconds{30} &&
+                   now - m_leader_requests_changed_at < std::chrono::seconds{60}) {
+            release("the host's Game Over loaded just before");
+        } else if (now - m_held_at > std::chrono::seconds{30}) {
+            release("the host's game didn't load in 30 s");
+        }
+
         return;
     }
 

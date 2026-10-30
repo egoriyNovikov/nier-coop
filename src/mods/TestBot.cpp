@@ -357,7 +357,7 @@ void TestBot::start(const Command& command) {
                 finish("ok " + command.text);
             }
         } else if (command.verb == "hp") {
-            // hp <value>: health of our character (0 kills it: the death sequence and its phase request).
+            // hp <value>: health of our character. 0 doesn't kill it: a death needs a hit or `die`.
             const auto value = (uint32_t)std::stoul(command.arg1);
             bool done{false};
 
@@ -367,10 +367,30 @@ void TestBot::start(const Command& command) {
 
                 if (player != nullptr && player->behavior != nullptr) {
                     player->behavior->as<sdk::BehaviorAppBase>()->health() = value;
+
+                    // The game copies the real health over health() every frame.
+                    if (player->behavior->is_pl0000()) {
+                        player->behavior->as<sdk::Pl0000>()->real_health() = (int32_t)value;
+                    }
+
                     done = true;
                 }
             }, std::chrono::seconds{3});
             finish(done ? "ok " + command.text : "error hp: no character");
+        } else if (command.verb == "die") {
+            // die: our character dies the way the game kills it (sdk::Pl0000::kill), with the Body Report and the Game Over.
+            bool done{false};
+
+            run_on_game_thread([&] {
+                const auto entity_list = sdk::EntityList::get();
+                const auto player = entity_list != nullptr ? entity_list->get_possessed_entity() : nullptr;
+
+                if (player != nullptr && player->behavior != nullptr && player->behavior->is_pl0000()) {
+                    player->behavior->as<sdk::Pl0000>()->kill();
+                    done = true;
+                }
+            }, std::chrono::seconds{3});
+            finish(done ? "ok " + command.text : "error die: no character");
         } else if (command.verb == "graphs") {
             // graphs: the phase's script graphs the mod knows (StoryActionSync).
             for (const auto& line : StoryActionSync::get().describe_graphs()) {
@@ -625,6 +645,11 @@ std::string TestBot::describe_state() {
         if (player != nullptr && player->behavior != nullptr) {
             const auto& p = player->behavior->position();
             s << " player=" << p.x << "," << p.y << "," << p.z << " model=" << std::hex << (uint32_t)player->behavior->model_index() << std::dec;
+
+            if (player->behavior->is_pl0000()) {
+                auto pl = player->behavior->as<sdk::Pl0000>();
+                s << " pl_state=0x" << std::hex << pl->state() << std::dec << " hp=" << pl->real_health();
+            }
             // In the Bunker each game turns its ring differently: compare positions of two games in the ring's frame
             // (what goes over the network, sdk::BunkerRing). Outside the Bunker ring_player is the same as player.
             static uint32_t ring_handle{0};
@@ -1076,6 +1101,13 @@ void TestBot::list_entities(float radius) {
         // Orientation quaternion (+0x60, see sdk::BunkerRing): a Flight Unit leaves the euler angles at 0.
         const auto quat = (const float*)((uintptr_t)entity->behavior + 0x60);
         line << " quat=" << quat[0] << "," << quat[1] << "," << quat[2] << "," << quat[3];
+
+        // Characters: state, real health and invulnerability (TASKS 1.4.2: the other player's puppet can't be hurt).
+        if (entity->behavior->is_pl0000()) {
+            auto pl = entity->behavior->as<sdk::Pl0000>();
+            line << " pl_state=0x" << std::hex << pl->state() << std::dec << " hp=" << pl->real_health() << " muteki=" << pl->muteki_timer();
+        }
+
         // The entity layout that placed it (sdk::LAYOUT_ID_OFFSET) and the behavior's address, for research.
         line << " layout=" << std::hex << *(const uint32_t*)((uintptr_t)entity->behavior + sdk::LAYOUT_ID_OFFSET) << " beh="
              << (uintptr_t)entity->behavior << std::dec;
