@@ -27,6 +27,13 @@ public:
 
     static inline std::atomic<bool> enabled{true};
 
+    // TASKS 3.4.2, decision 2026-10-30: only the host skips cutscenes. While the client's game plays one in a session,
+    // the pause of a cutscene (its only items are Skip and Back) can't be opened: START and Esc don't reach the game.
+    // The host's skip still ends the client's cutscene (StoryActionSync). Set by AutomataMPMod every frame.
+    static inline std::atomic<bool> block_cutscene_pause{false};
+    // Clears what may not reach the game right now from a pad's state.
+    static void filter_pad(XINPUT_STATE* state);
+
 private:
     static SHORT WINAPI get_async_key_state(int key);
     static SHORT WINAPI get_key_state(int key);

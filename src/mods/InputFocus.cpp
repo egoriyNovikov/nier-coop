@@ -96,15 +96,24 @@ bool InputFocus::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_par
     return message != WM_INPUT || has_focus();
 }
 
+void InputFocus::filter_pad(XINPUT_STATE* state) {
+    if (!has_focus()) {
+        // Still connected (no "controller disconnected" from the game), but nothing pressed.
+        state->Gamepad = {};
+    } else if (block_cutscene_pause) {
+        state->Gamepad.wButtons &= ~XINPUT_GAMEPAD_START;
+    }
+}
+
 SHORT WINAPI InputFocus::get_async_key_state(int key) {
     const auto result = g_focus->m_async_key_hook->get_original<decltype(get_async_key_state)>()(key);
-    return has_focus() ? result : 0;
+    return has_focus() && !(key == VK_ESCAPE && block_cutscene_pause) ? result : 0;
 }
 
 SHORT WINAPI InputFocus::get_key_state(int key) {
     const auto result = g_focus->m_key_hook->get_original<decltype(get_key_state)>()(key);
     // Toggles (Caps Lock, bit 0) are not input of the player, keep them.
-    return has_focus() ? result : (SHORT)(result & 1);
+    return has_focus() && !(key == VK_ESCAPE && block_cutscene_pause) ? result : (SHORT)(result & 1);
 }
 
 HRESULT WINAPI InputFocus::get_device_state(void* device, DWORD size, void* data) {
@@ -113,6 +122,8 @@ HRESULT WINAPI InputFocus::get_device_state(void* device, DWORD size, void* data
     if (SUCCEEDED(result) && data != nullptr && !has_focus()) {
         // Nothing pressed, no mouse movement (the game reads pads through XInput, not as DirectInput joysticks).
         std::memset(data, 0, size);
+    } else if (SUCCEEDED(result) && data != nullptr && size == 256 && block_cutscene_pause) {
+        ((uint8_t*)data)[DIK_ESCAPE] = 0; // the keyboard's state: a byte per key
     }
 
     return result;
@@ -124,6 +135,19 @@ HRESULT WINAPI InputFocus::get_device_data(void* device, DWORD object_size, void
 
     if (SUCCEEDED(result) && count != nullptr && data != nullptr && !has_focus()) {
         *count = 0;
+    } else if (SUCCEEDED(result) && count != nullptr && data != nullptr && block_cutscene_pause && object_size >= sizeof(DIDEVICEOBJECTDATA)) {
+        // Buffered keyboard events: drop the ones of Esc (a mouse has no object at that offset).
+        DWORD kept{0};
+
+        for (DWORD i = 0; i < *count; ++i) {
+            const auto event = (const DIDEVICEOBJECTDATA*)((const uint8_t*)data + i * object_size);
+
+            if (event->dwOfs != DIK_ESCAPE) {
+                std::memmove((uint8_t*)data + kept++ * object_size, event, object_size);
+            }
+        }
+
+        *count = kept;
     }
 
     return result;
@@ -132,9 +156,8 @@ HRESULT WINAPI InputFocus::get_device_data(void* device, DWORD object_size, void
 DWORD WINAPI InputFocus::xinput_get_state(DWORD user_index, XINPUT_STATE* state) {
     const auto result = g_focus->m_xinput_hook->get_original<decltype(xinput_get_state)>()(user_index, state);
 
-    if (result == ERROR_SUCCESS && state != nullptr && !has_focus()) {
-        // Still connected (no "controller disconnected" from the game), but nothing pressed.
-        state->Gamepad = {};
+    if (result == ERROR_SUCCESS && state != nullptr) {
+        filter_pad(state);
     }
 
     return result;

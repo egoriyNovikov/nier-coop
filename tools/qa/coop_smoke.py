@@ -64,7 +64,7 @@ def main():
     # Game logs carry graph names in Shift-JIS; the console may not show every character.
     sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host", "leave", "leave_lost", "leave_host", "background_keys"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host", "leave", "leave_lost", "leave_host", "background_keys", "cutscene_skip"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
                              "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
@@ -74,7 +74,8 @@ def main():
                              "death_world: the same in the open world, with the Body Report; death_host: the host dies first; "
                              "leave: the client presses Disconnect, the host's 9S goes back to the AI and follows 2B; "
                              "leave_lost: the client's game is killed (lost connection); leave_host: the host leaves; "
-                             "background_keys: keys pressed in one game's window don't reach the other (background) one")
+                             "background_keys: keys pressed in one game's window don't reach the other (background) one; "
+                             "cutscene_skip: the client can't skip the launch cutscene, the host's skip ends it for both")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -92,7 +93,8 @@ def main():
         {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar,
          "client_talk": client_talk, "death": death,
          "death_world": lambda e: death(e, 0), "death_host": lambda e: death(e, 1, HOST),
-         "leave": leave, "leave_lost": lambda e: leave(e, lost=True), "leave_host": lambda e: leave(e, HOST), "background_keys": background_keys}[args.scenario](expect)
+         "leave": leave, "leave_lost": lambda e: leave(e, lost=True), "leave_host": lambda e: leave(e, HOST), "background_keys": background_keys,
+         "cutscene_skip": cutscene_skip}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -685,6 +687,52 @@ def background_keys(expect):
     expect(walked > 2, "the bot's virtual pad still drives the window in the background")
     log = log_text(HOST)
     expect("[Input] Input of the player is ignored" in log and "[Input] Failed" not in log, "InputFocus hooked everything")
+
+
+def cutscene_skip(expect):
+    """TASKS 3.4.2, decision 2026-10-30: only the host skips cutscenes. Both play the launch cutscene ev0200 (the host
+    walks to its Flight Unit as in hangar). The client presses START, A (pause of the cutscene, Skip): its cutscene goes
+    on. Then the host skips: the client's cutscene ends with it (the host's finished story action, StoryActionSync)."""
+    result = connect(expect, 1, 1)
+    if result is None:
+        return
+    host_start = parse(result[2], "player")
+    talk_to_commander(expect, result[2], result[3])
+    bot.cmd(HOST, [f"goto {host_start.replace(',', ' ')} 0", "wait 3000"], quiet=True)
+    expect(bot.goto_entity(HOST, FLIGHT_UNIT, 2.2, 0.6, 0, 90), "the host is next to the flight unit")
+
+    def events():
+        return parse(bot.cmd(HOST, ["state"], quiet=True)[-1], "event"), parse(bot.cmd(CLIENT, ["state"], quiet=True)[-1], "event")
+
+    both = False
+    for _ in range(40):
+        if events() == ("ev0200", "ev0200"):
+            both = True
+            break
+        time.sleep(0.5)
+    expect(both, "both games play the launch cutscene ev0200")
+    if not both:
+        return
+    bot.cmd(CLIENT, ["wait 2000", "pad START 150", "wait 1200", "shot cutscene_skip_client_tries", "pad A 150", "wait 2500"], quiet=True)
+    host_event, client_event = events()
+    print(f"  observed: after the client's START, A: host {host_event}, client {client_event}")
+    expect(client_event == "ev0200", "the client couldn't skip the cutscene")
+    expect("only the host can skip it" in log_text(CLIENT), "the client's mod turned the pause of the cutscene off")
+    if host_event != "ev0200":
+        return
+    bot.cmd(HOST, ["pad START 150", "wait 1200", "pad A 150"], quiet=True)
+    skipped_at = time.time()
+    ended = {}
+    for _ in range(20):
+        for slot, event in zip((HOST, CLIENT), events()):
+            if event != "ev0200" and slot not in ended:
+                ended[slot] = time.time() - skipped_at
+        if len(ended) == 2:
+            break
+        time.sleep(0.25)
+    print(f"  observed: after the host's skip the cutscene ended: host {ended.get(HOST)}, client {ended.get(CLIENT)} s")
+    expect(HOST in ended, "the host skipped the cutscene")
+    expect(CLIENT in ended and ended[CLIENT] < 3, "the client's cutscene ended with the host's skip")
 
 
 DEATH_STATES = {"0x33", "0x34", "0x35", "0x36"}

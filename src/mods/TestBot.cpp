@@ -132,8 +132,8 @@ DWORD WINAPI TestBot::xinput_get_state(DWORD user_index, XINPUT_STATE* state) {
         // A real pad: nothing pressed while another window is in front (InputFocus).
         const auto result = original(user_index, state);
 
-        if (result == ERROR_SUCCESS && state != nullptr && !InputFocus::has_focus()) {
-            state->Gamepad = {};
+        if (result == ERROR_SUCCESS && state != nullptr) {
+            InputFocus::filter_pad(state);
         }
 
         return result;
@@ -147,6 +147,12 @@ DWORD WINAPI TestBot::xinput_get_state(DWORD user_index, XINPUT_STATE* state) {
     state->Gamepad.bRightTrigger = (buttons & RT) ? 255 : 0;
     state->Gamepad.sThumbLX = g_stick_x.load();
     state->Gamepad.sThumbLY = g_stick_y.load();
+
+    // The bot's pad is not the player's, it works in the background; but it can't skip as the client either.
+    if (InputFocus::block_cutscene_pause) {
+        state->Gamepad.wButtons &= ~XINPUT_GAMEPAD_START;
+    }
+
     return ERROR_SUCCESS;
 }
 

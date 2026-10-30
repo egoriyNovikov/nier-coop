@@ -600,6 +600,14 @@ void AutomataMPMod::on_frame() {
 
     update_connection();
 
+    // TASKS 3.4.2: only the host skips cutscenes.
+    const auto block_pause = m_client != nullptr && m_client->is_in_session() && !m_client->is_master_client() &&
+        StoryWatcher::get().current().event != 0;
+
+    if (block_pause != InputFocus::block_cutscene_pause.exchange(block_pause) && block_pause) {
+        spdlog::info("[Coop] Cutscene ev{:04x}: only the host can skip it, our pause of the cutscene is off", StoryWatcher::get().current().event);
+    }
+
     std::string state = "Disconnected";
     auto mismatch = NierClient::StoryMismatch::none;
 
