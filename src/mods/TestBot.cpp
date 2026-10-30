@@ -285,6 +285,10 @@ void TestBot::start(const Command& command) {
         } else if (command.verb == "join") {
             const auto error = AutomataMPMod::get()->join_game(command.arg1, command.arg2 == "host");
             finish(error ? "error join: " + *error : "ok " + command.text);
+        } else if (command.verb == "leave") {
+            // leave: the Disconnect button of the Co-op menu.
+            AutomataMPMod::get()->destroy_client();
+            finish("ok leave");
         } else if (command.verb == "coop") {
             finish(AutomataMPMod::get()->describe_coop());
         } else if (command.verb == "read") {

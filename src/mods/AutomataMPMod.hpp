@@ -64,6 +64,8 @@ public:
     void debug_hotkeys(sdk::EntityList* entity_list, sdk::Entity* player);
     void log_world_state(const char* state);
     std::tuple<std::string, std::string> validate_connection(std::string ip, std::string port);
+    // The Disconnect button: leaves the session (and stops our server when hosting).
+    void destroy_client();
     void signal_destroy_client() {
         m_wants_destroy_client = true;
     }
@@ -98,7 +100,6 @@ private:
     void display_coop();
     void start_connect(const std::string& host, const std::string& port, bool is_host, bool wants_host);
     void update_connection();
-    void destroy_client();
 
     struct PendingConnect {
         std::string host;

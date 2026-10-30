@@ -63,14 +63,16 @@ def main():
     # Game logs carry graph names in Shift-JIS; the console may not show every character.
     sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host"], default="together",
+    parser.add_argument("--scenario", choices=["together", "diverged", "routes", "commander", "midjoin", "world", "hangar", "client_talk", "death", "death_world", "death_host", "leave", "leave_lost", "leave_host"], default="together",
                         help="together: both load the same save; diverged: the games are at different story points; "
                              "routes: the games are on routes A and B; commander: the host talks to the Commander; "
                              "midjoin: the host talks to her before the client joins; world: open world, personal graphs stay with the host; "
                              "hangar: then the host flies off from the hangar (natural phase change); "
                              "client_talk: the client tries the host's story talk with the Commander; "
                              "death: the client dies, the host's character dies too, both continue (Bunker); "
-                             "death_world: the same in the open world, with the Body Report; death_host: the host dies first")
+                             "death_world: the same in the open world, with the Body Report; death_host: the host dies first; "
+                             "leave: the client presses Disconnect, the host's 9S goes back to the AI and follows 2B; "
+                             "leave_lost: the client's game is killed (lost connection); leave_host: the host leaves")
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -87,7 +89,8 @@ def main():
     try:
         {"together": together, "diverged": diverged, "routes": routes, "commander": commander, "midjoin": midjoin, "world": world, "hangar": hangar,
          "client_talk": client_talk, "death": death,
-         "death_world": lambda e: death(e, 0), "death_host": lambda e: death(e, 1, HOST)}[args.scenario](expect)
+         "death_world": lambda e: death(e, 0), "death_host": lambda e: death(e, 1, HOST),
+         "leave": leave, "leave_lost": lambda e: leave(e, lost=True), "leave_host": lambda e: leave(e, HOST)}[args.scenario](expect)
     finally:
         isolated = [bot.stop(slot) for slot in (HOST, CLIENT)]
         server = bot.slot_dir(HOST) / "automatamp_server" / "server.exe"
@@ -509,6 +512,67 @@ def fly_together(expect):
     expect(parse(state, "phase_held") == "0" or len(released) >= len(held) - 1,
            f"the client's game is not stuck with a held phase request (held {len(held)}, let through {len(released)})")
 
+
+
+def leave(expect, who=CLIENT, lost=False):
+    """TASKS 1.2.6 and 1.2.3: one player leaves (Disconnect, or the game is killed: a lost connection), the other's
+    game gives the story buddy back to the AI. The buddy follows the hero again: the one who stayed walks away,
+    the buddy comes after it. Open world (save 0, finished save): the client plays 9S, the host 2B."""
+    stays = HOST if who == CLIENT else CLIENT
+    if connect(expect, 0, 0) is None:
+        return
+    buddy_model = "10200" if stays == HOST else "10000"
+
+    def buddy():
+        lines = [l for l in entities(stays) if l.startswith("entity") and f" model={buddy_model} " in l
+                 and " distance=0 " not in l]  # not our own hero (in the client's game 2B keeps the name Player)
+        return lines[0] if lines else None
+
+    before = buddy()
+    print("  observed: buddy before: " + (before.split(" rot=")[0] + " muteki=" + str(parse(before, "muteki")) if before else "none"))
+    expect(before is not None and float(parse(before, "muteki") or 0) >= 250, f"{who}'s puppet is in {stays}'s game, kept unhurt")
+
+    if lost:
+        bot.stop(who)
+    else:
+        expect(bot.cmd(who, ["leave"])[-1] == "ok leave", f"{who} pressed Disconnect")
+
+    # A lost connection is noticed by the server's ENet timeout (up to ~30 s).
+    returned = False
+    for _ in range(45):
+        if f"Returning the story buddy of" in log_text(stays):
+            returned = True
+            break
+        bot.cmd(stays, ["wait 1000"], quiet=True)
+    expect(returned, f"{stays}'s game gave the buddy back to the AI")
+    coop = bot.cmd(stays, ["wait 2000", "coop"], quiet=True)[-1]
+    print(f"  observed: {stays}: {coop[:160]}")
+    if who == CLIENT:
+        expect(parse(coop, "session") == "1" and parse(coop, "data") != "1", "the host stays hosting, without the client's data")
+
+    # The game counts the invulnerability timer down once the mod stops keeping it up (300 frames).
+    bot.cmd(stays, ["wait 6000"], quiet=True)
+    after = buddy()
+    expect(after is not None, f"the buddy is still in {stays}'s game")
+    if after is None:
+        return
+    expect(float(parse(after, "muteki") or 0) < 250, f"the buddy's invulnerability ran out (muteki {parse(after, 'muteki')})")
+
+    # 1.2.3: walk away from the buddy, it must follow.
+    start = position(parse(bot.cmd(stays, ["state"], quiet=True)[-1], "player"))
+    bot.cmd(stays, ["stick 0 1 5000", "stick 0 0 100", "wait 6000"], quiet=True)
+    state = bot.cmd(stays, ["state"], quiet=True)[-1]
+    hero = position(parse(state, "player"))
+    walked = sum((a - b) ** 2 for a, b in zip(hero, start)) ** 0.5
+    followed = buddy()
+    gap = float(parse(followed, "distance")) if followed else None
+    moved = (sum((a - b) ** 2 for a, b in zip(position(parse(followed, "pos")), position(parse(after, "pos")))) ** 0.5
+             if followed else None)
+    print(f"  observed: hero walked {walked:.1f} m, the buddy moved {moved if moved is None else round(moved, 1)} m, "
+          f"is {gap} m away, pl_state {parse(followed, 'pl_state') if followed else None}")
+    bot.cmd(stays, [f"shot leave_{stays}"], quiet=True)
+    expect(walked > 5, "the hero walked away (stick)")
+    expect(moved is not None and moved > 0.6 * walked and gap is not None and gap < 12, "the buddy followed the hero (AI)")
 
 
 DEATH_STATES = {"0x33", "0x34", "0x35", "0x36"}
