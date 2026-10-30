@@ -20,6 +20,7 @@
 Prints RESULT: PASS or RESULT: FAIL; exit code 0 on PASS.
 """
 import argparse
+import math
 import re
 import subprocess
 import sys
@@ -479,7 +480,12 @@ def fly_together(expect):
     before 2026-10-22 the client's held phase request waited for a phase name change that never came)."""
     errors = {HOST: [], CLIENT: []}
     cameras = {HOST: [], CLIENT: []}
-    for _ in range(12):
+    # 1.3.13, 2026-10-30: a Flight Unit's turn is only in its cObj matrix (`mat=`), and in this flight the game turns
+    # both units of a game the same, whoever steers (the host's stick changed nothing between its unit and the AI's).
+    # So the buddy's unit keeps the game's turn; check that the mod doesn't break it. The host steers meanwhile.
+    own_mats, buddy_mats = {HOST: [], CLIENT: []}, {HOST: [], CLIENT: []}
+    for i in range(12):
+        bot.cmd(HOST, [f"stick {(-1, 1, 0)[i % 3]} 0 0"], quiet=True)
         for slot in (HOST, CLIENT):
             lines = entities(slot, ["state", "coop"])
             me, net = position(parse(lines[0], "player")), position(parse(lines[1], "pos"))
@@ -490,7 +496,14 @@ def fly_together(expect):
             if me and net and len(units) >= 2:
                 other = max(units, key=lambda u: sum((a - b) ** 2 for a, b in zip(u, me)))
                 errors[slot].append(sum((a - b) ** 2 for a, b in zip(other, net)) ** 0.5)
+            unit_lines = [l for l in lines if l.startswith("entity") and " model=10010 " in l and parse(l, "mat")
+                          and abs(float(parse(l, "distance"))) < 100]
+            if me and len(unit_lines) >= 2:
+                by_distance = sorted(unit_lines, key=lambda l: float(parse(l, "distance")))
+                own_mats[slot].append([float(x) for x in parse(by_distance[0], "mat").split(",")])
+                buddy_mats[slot].append([float(x) for x in parse(by_distance[-1], "mat").split(",")])
         bot.cmd(HOST, ["wait 1500"], quiet=True)
+    bot.cmd(HOST, ["stick 0 0 100"], quiet=True)
     bot.cmd(HOST, ["shot fly_host"], quiet=True)
     bot.cmd(CLIENT, ["shot fly_client"], quiet=True)
     for slot, who in ((HOST, "the client's"), (CLIENT, "the host's")):
@@ -499,6 +512,15 @@ def fly_together(expect):
         print(f"  observed: {slot} puppet unit off the network position: {[round(x, 2) for x in e]}")
         expect(len(e) >= 6 and median < 1.0,
                f"in {slot}'s game {who} Flight Unit flies where that player is (median {median if median is None else round(median, 2)} m of {len(e)})")
+    for slot in (HOST, CLIENT):
+        pairs = list(zip(own_mats[slot], buddy_mats[slot]))
+        diffs = sorted(max(abs(a - b) for a, b in zip(o, v)) for o, v in pairs)
+        median = diffs[len(diffs) // 2] if diffs else None
+        banks = [(round(math.degrees(math.atan2(o[1], o[0]))), round(math.degrees(math.atan2(v[1], v[0])))) for o, v in pairs]
+        print(f"  observed: {slot}: own unit bank / the buddy's (deg): {banks}")
+        expect(len(diffs) >= 6 and median < 0.05,
+               f"in {slot}'s game the buddy's Flight Unit is turned as ours, by the game (median matrix difference "
+               f"{median if median is None else round(median, 3)} of {len(diffs)})")
     # Owner's report 2026-10-22: with the buddy as a puppet the flight never turned into the battle from above (camera
     # 13-16 m, the unit stayed a mech and fired down). Alone the camera goes from 20 m to ~46 m after ~12 s of each block.
     for slot in (HOST, CLIENT):

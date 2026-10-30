@@ -1105,6 +1105,11 @@ void TestBot::list_entities(float radius) {
         // Orientation quaternion (+0x60, see sdk::BunkerRing): a Flight Unit leaves the euler angles at 0.
         const auto quat = (const float*)((uintptr_t)entity->behavior + 0x60);
         line << " quat=" << quat[0] << "," << quat[1] << "," << quat[2] << "," << quat[3];
+        // cObj matrix rows (+0x10, +0x20, +0x30): the only place a Flight Unit keeps its turn (TASKS 1.3.13); the quaternion
+        // and the euler angles above stay zero.
+        const auto mat = (const float*)((uintptr_t)entity->behavior + 0x10);
+        line << " mat=" << mat[0] << "," << mat[1] << "," << mat[2] << "," << mat[4] << "," << mat[5] << "," << mat[6] << ","
+             << mat[8] << "," << mat[9] << "," << mat[10];
 
         // Characters: state, real health and invulnerability (TASKS 1.4.2: the other player's puppet can't be hurt).
         if (entity->behavior->is_pl0000()) {
